@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+//
+// Remodulates the denoised illumination with albedo, adds primary emission and aerial fog,
+// then tonemaps (ACES) to an 8-bit sRGB-ish image for display.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ImageSize();
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    uint cur = CurrentIndex();
+    vec3 illum = imageLoad(filterTemp[pc.pass.y], px).rgb;
+    vec3 albedo = imageLoad(gAlbedo, px).rgb;
+    vec3 emission = imageLoad(gEmission, px).rgb;
+    vec4 pos = imageLoad(gPos[cur], px);
+
+    vec3 color = illum * albedo + emission;
+    if (pos.w > 0.0) {
+        vec3 toPoint = pos.xyz - ubo.cameraPos.xyz;
+        float dist = length(toPoint);
+        float fog = 1.0 - exp(-pow(dist * ubo.groundColor.a, 1.6));
+        color = mix(color, SkyGradient(toPoint / max(dist, 1e-4)), clamp(fog, 0.0, 1.0));
+    }
+
+    color = ACES(max(color, vec3(0.0)) * ubo.skyHorizon.a);
+    imageStore(outColor, px, vec4(pow(color, vec3(1.0 / 2.2)), 1.0));
+}

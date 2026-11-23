@@ -12,5 +12,9 @@ each one stays under its own license. All of these licenses are GPL-compatible.
 | Dear ImGui (docking) | 1.91.9b | MIT | https://github.com/ocornut/imgui |
 | nlohmann/json | 3.11.3 | MIT | https://github.com/nlohmann/json |
 | .NET runtime, nethost / hostfxr | 8.0+ | MIT | https://github.com/dotnet/runtime |
+| Vulkan-Headers | 1.3.296 | Apache-2.0 / MIT | https://github.com/KhronosGroup/Vulkan-Headers |
+| volk | 1.3.296 | MIT | https://github.com/zeux/volk |
+| Vulkan Memory Allocator | 3.1.0 | MIT | https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator |
+| glslang (build-time shader compiler only) | 15.0.0 | BSD-3-Clause and others | https://github.com/KhronosGroup/glslang |
 
 If you distribute MAGE binaries, include these notices along with the corresponding license texts from each project.

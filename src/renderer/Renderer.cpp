@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "renderer/Renderer.h"
+#include "raytracing/PathTracer.h"
 #include "renderer/GL.h"
 #include "core/Log.h"
 
@@ -203,6 +204,22 @@ out vec4 FragColor;
 void main() { FragColor = vec4(vColor, 1.0); }
 )";
 
+const char* kBlitVS = R"(#version 410 core
+out vec2 vUV;
+void main() {
+    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)) * 2.0 - 1.0;
+    vUV = p * 0.5 + 0.5;
+    gl_Position = vec4(p, 0.0, 1.0);
+}
+)";
+
+const char* kBlitFS = R"(#version 410 core
+in vec2 vUV;
+out vec4 FragColor;
+uniform sampler2D uImage;
+void main() { FragColor = vec4(texture(uImage, vUV).rgb, 1.0); }
+)";
+
 #undef MAGE_GLSL_COMMON
 
 } // namespace
@@ -210,7 +227,9 @@ void main() { FragColor = vec4(vColor, 1.0); }
 // ============================================================================ Lifetime
 Renderer::~Renderer() { Shutdown(); }
 
-bool Renderer::Init() {
+bool Renderer::PathTracingAvailable() const { return m_pathTracer && m_pathTracer->Available(); }
+
+bool Renderer::Init(const std::filesystem::path& shaderDirectory) {
     Log::Info("OpenGL renderer: {} | {} | {}",
               reinterpret_cast<const char*>(glGetString(GL_VENDOR)),
               reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
@@ -230,7 +249,8 @@ bool Renderer::Init() {
 #endif
 
     if (!m_pbrShader.Create("PBR", kPbrVS, kPbrFS) || !m_shadowShader.Create("Shadow", kShadowVS, kShadowFS) ||
-        !m_skyShader.Create("Sky", kSkyVS, kSkyFS) || !m_lineShader.Create("Lines", kLineVS, kLineFS)) {
+        !m_skyShader.Create("Sky", kSkyVS, kSkyFS) || !m_lineShader.Create("Lines", kLineVS, kLineFS) ||
+        !m_blitShader.Create("Blit", kBlitVS, kBlitFS)) {
         return false;
     }
 
@@ -250,12 +270,24 @@ bool Renderer::Init() {
 
     if (!CreateShadowMap(m_shadowSize)) return false;
 
+    // Optional hardware path tracer (Vulkan ray queries).
+    m_pathTracer = std::make_unique<PathTracer>();
+    if (!shaderDirectory.empty() && m_pathTracer->Init(shaderDirectory, m_meshes)) {
+        Log::Info("Rendering mode: hardware path tracing (F3 toggles raster)");
+    } else {
+        Log::Warn("Path tracer unavailable ({}) - using the raster renderer",
+                  m_pathTracer->Stats().error.empty() ? std::string("disabled") : m_pathTracer->Stats().error);
+        pathTracing = false;
+    }
+
     m_initialized = true;
     return true;
 }
 
 void Renderer::Shutdown() {
     if (!m_initialized) return;
+    if (m_pathTracer) m_pathTracer->Shutdown();
+    m_pathTracer.reset();
     m_meshes.Destroy();
     DestroyRenderTarget(m_viewport);
     if (m_shadowTex) glDeleteTextures(1, &m_shadowTex);
@@ -268,6 +300,7 @@ void Renderer::Shutdown() {
     m_shadowShader.Destroy();
     m_skyShader.Destroy();
     m_lineShader.Destroy();
+    m_blitShader.Destroy();
     m_initialized = false;
 }
 
@@ -394,6 +427,22 @@ void Renderer::DrawMesh(const Mesh& mesh) const {
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_INT, nullptr);
 }
 
+void Renderer::DrawLines() {
+    m_stats.lineVertices = static_cast<uint32_t>(m_lines.size());
+    if (m_lines.empty()) return;
+    glBindVertexArray(m_lineVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
+    const size_t bytes = m_lines.size() * sizeof(LineVertex);
+    if (bytes > m_lineVboCapacity) {
+        m_lineVboCapacity = bytes * 2;
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_lineVboCapacity), nullptr, GL_STREAM_DRAW);
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_lines.data());
+    m_lineShader.Bind();
+    m_lineShader.SetMat4("uViewProj", m_viewProj);
+    glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(m_lines.size()));
+}
+
 void Renderer::EndFrame(uint32_t targetFramebuffer) {
     m_stats.submitted = static_cast<uint32_t>(m_commands.size());
 
@@ -412,6 +461,32 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         m_visible.push_back(i);
     }
     m_stats.drawn = static_cast<uint32_t>(m_visible.size());
+
+    // ---- Hardware path tracing -------------------------------------------------------
+    if (pathTracing && PathTracingAvailable()) {
+        const uint32_t image = m_pathTracer->Render(m_commands, m_camera, lighting, m_width, m_height);
+        if (image) {
+            m_stats.pathTraced = true;
+            m_stats.drawn = m_pathTracer->Stats().instances;
+            m_stats.culled = 0;
+            glBindFramebuffer(GL_FRAMEBUFFER, targetFramebuffer);
+            glViewport(0, 0, m_width, m_height);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+            m_blitShader.Bind();
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, image);
+            m_blitShader.SetInt("uImage", 0);
+            glBindVertexArray(m_emptyVao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            DrawLines(); // physics debug overlay (no depth information when path traced)
+            glBindVertexArray(0);
+            glEnable(GL_CULL_FACE);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return;
+        }
+    }
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
@@ -499,20 +574,7 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
     glDepthFunc(GL_LESS);
 
     // ---- Debug lines -------------------------------------------------------------------
-    m_stats.lineVertices = static_cast<uint32_t>(m_lines.size());
-    if (!m_lines.empty()) {
-        glBindVertexArray(m_lineVao);
-        glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
-        const size_t bytes = m_lines.size() * sizeof(LineVertex);
-        if (bytes > m_lineVboCapacity) {
-            m_lineVboCapacity = bytes * 2;
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_lineVboCapacity), nullptr, GL_STREAM_DRAW);
-        }
-        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_lines.data());
-        m_lineShader.Bind();
-        m_lineShader.SetMat4("uViewProj", m_viewProj);
-        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(m_lines.size()));
-    }
+    DrawLines();
 
     glBindVertexArray(0);
     glEnable(GL_CULL_FACE);

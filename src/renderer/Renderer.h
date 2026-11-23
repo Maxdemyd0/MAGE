@@ -11,6 +11,8 @@
 //   * Immediate-mode debug lines (used by the Jolt physics debug renderer)
 
 #include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -18,8 +20,11 @@
 #include "core/Camera.h"
 #include "renderer/Mesh.h"
 #include "renderer/Shader.h"
+#include "raytracing/PathTracer.h"
 
 namespace mage {
+
+
 
 struct Material {
     glm::vec3 albedo{0.8f};
@@ -56,6 +61,7 @@ struct RenderStats {
     uint32_t culled = 0;
     uint32_t shadowCasters = 0;
     uint32_t lineVertices = 0;
+    bool pathTraced = false;
 };
 
 struct RenderTarget {
@@ -73,7 +79,8 @@ public:
     Renderer(const Renderer&) = delete;
     Renderer& operator=(const Renderer&) = delete;
 
-    bool Init();
+    // shaderDirectory: compiled SPIR-V for the Vulkan path tracer (optional; raster works without it).
+    bool Init(const std::filesystem::path& shaderDirectory = {});
     void Shutdown();
 
     MeshLibrary& Meshes() { return m_meshes; }
@@ -90,6 +97,11 @@ public:
     const RenderStats& Stats() const { return m_stats; }
     const glm::mat4& ViewProjection() const { return m_viewProj; }
 
+    // Hardware path tracer (unavailable when the GPU or the build lacks Vulkan ray queries).
+    PathTracer* GetPathTracer() { return m_pathTracer.get(); }
+    bool PathTracingAvailable() const;
+    bool pathTracing = true; // use the path tracer when available, otherwise the raster pipeline
+
     LightingSettings lighting;
     bool frustumCulling = true;
     glm::vec3 clearColor{0.1f, 0.1f, 0.12f};
@@ -104,12 +116,15 @@ private:
     void DestroyRenderTarget(RenderTarget& rt);
     glm::mat4 ComputeLightViewProjection() const;
     void DrawMesh(const Mesh& mesh) const;
+    void DrawLines();
 
     MeshLibrary m_meshes;
     Shader m_pbrShader;
     Shader m_shadowShader;
     Shader m_skyShader;
     Shader m_lineShader;
+    Shader m_blitShader;
+    std::unique_ptr<PathTracer> m_pathTracer;
 
     uint32_t m_emptyVao = 0;
     uint32_t m_lineVao = 0;

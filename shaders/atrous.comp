@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+//
+// Edge-aware a-trous wavelet filter (SVGF). Run several times with step 1, 2, 4, 8, 16.
+// 3x3 B-spline kernel per pass (5 passes cover a 63x63 footprint) with edge stopping on
+// normals, view depth and luminance scaled by the local variance, so converged low-variance
+// pixels are barely touched while fresh noise is smoothed. Reads one packed guide image per tap.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ImageSize();
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    int step = pc.pass.x;
+    int src = pc.pass.y;
+    int dst = pc.pass.z;
+
+    vec4 center = imageLoad(filterTemp[src], px);
+    vec4 guide = imageLoad(gGuide, px);
+    if (guide.w < 0.0) { // sky: nothing to denoise
+        imageStore(filterTemp[dst], px, center);
+        return;
+    }
+    float lum = Luminance(center.rgb);
+    float sigmaL = ubo.params1.z * sqrt(max(center.a, 0.0)) + 1e-4;
+    // Depth tolerance grows with distance and filter step (screen-space footprint).
+    float sigmaZ = max(guide.w * 0.01 * float(step), 1e-3);
+
+    const float kernel[2] = float[2](0.5, 0.25);
+    vec3 sumColor = center.rgb * 0.25;
+    float sumVariance = center.a * 0.0625;
+    float sumWeight = 0.25;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 q = px + ivec2(dx, dy) * step;
+            if (q.x < 0 || q.y < 0 || q.x >= size.x || q.y >= size.y) continue;
+            vec4 gq = imageLoad(gGuide, q);
+            if (gq.w < 0.0) continue;
+            vec4 sq = imageLoad(filterTemp[src], q);
+
+            float wN = pow(max(dot(guide.xyz, gq.xyz), 0.0), 64.0);
+            float wZ = exp(-abs(guide.w - gq.w) / sigmaZ);
+            float wL = exp(-abs(lum - Luminance(sq.rgb)) / sigmaL);
+            float w = kernel[abs(dx)] * kernel[abs(dy)] * wN * wZ * wL;
+
+            sumColor += sq.rgb * w;
+            sumVariance += sq.a * w * w;
+            sumWeight += w;
+        }
+    }
+    imageStore(filterTemp[dst], px, vec4(sumColor / sumWeight, sumVariance / (sumWeight * sumWeight)));
+}

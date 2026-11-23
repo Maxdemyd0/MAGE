@@ -177,6 +177,7 @@ MeshHandle MeshLibrary::Add(const std::string& name, const MeshData& data) {
 
     const MeshHandle handle = static_cast<MeshHandle>(m_meshes.size());
     m_meshes.push_back(mesh);
+    m_data.push_back(data);
     m_byName[name] = handle;
     return handle;
 }
@@ -190,6 +191,10 @@ const Mesh* MeshLibrary::Get(MeshHandle handle) const {
     return handle < m_meshes.size() ? &m_meshes[handle] : nullptr;
 }
 
+const MeshData* MeshLibrary::GetData(MeshHandle handle) const {
+    return handle < m_data.size() ? &m_data[handle] : nullptr;
+}
+
 void MeshLibrary::Destroy() {
     for (Mesh& m : m_meshes) {
         if (m.ibo) glDeleteBuffers(1, &m.ibo);
@@ -197,6 +202,7 @@ void MeshLibrary::Destroy() {
         if (m.vao) glDeleteVertexArrays(1, &m.vao);
     }
     m_meshes.clear();
+    m_data.clear();
     m_byName.clear();
 }
 

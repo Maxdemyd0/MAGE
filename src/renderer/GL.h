@@ -46,6 +46,7 @@ inline constexpr GLenum GL_BACK = 0x0405;
 inline constexpr GLenum GL_CULL_FACE = 0x0B44;
 inline constexpr GLenum GL_DEPTH_TEST = 0x0B71;
 inline constexpr GLenum GL_BLEND = 0x0BE2;
+inline constexpr GLenum GL_UNPACK_ALIGNMENT = 0x0CF5;
 inline constexpr GLenum GL_PACK_ALIGNMENT = 0x0D05;
 inline constexpr GLenum GL_TEXTURE_2D = 0x0DE1;
 inline constexpr GLenum GL_TEXTURE_BORDER_COLOR = 0x1004;
@@ -156,6 +157,7 @@ inline constexpr GLenum GL_DEBUG_SEVERITY_NOTIFICATION = 0x826B;
     X(void, GenTextures, (GLsizei n, GLuint* textures))                                                       \
     X(void, BindTexture, (GLenum target, GLuint texture))                                                     \
     X(void, TexImage2D, (GLenum target, GLint level, GLint internalFormat, GLsizei w, GLsizei h, GLint border, GLenum format, GLenum type, const void* data)) \
+    X(void, TexSubImage2D, (GLenum target, GLint level, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, const void* data)) \
     X(void, TexParameteri, (GLenum target, GLenum pname, GLint param))                                        \
     X(void, TexParameterfv, (GLenum target, GLenum pname, const GLfloat* params))                             \
     X(void, DeleteTextures, (GLsizei n, const GLuint* textures))                                              \

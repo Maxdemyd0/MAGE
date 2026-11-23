@@ -8,9 +8,11 @@
 //  live ImGui sliders for suspension stiffness / damping / engine torque.
 //
 //  Command line:
-//    --no-vsync           uncapped frame rate
+//    --no-vsync           uncapped frame rate (also removes the --max-fps cap)
+//    --max-fps <n>        frame cap, default 240 (0 = unlimited)
 //    --no-scripts         skip .NET (native C++ controller drives the car)
 //    --no-streaming       disable the sector streamer
+//    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
 //    --autodrive          demo autopilot: injects W/D key presses (exercises C++ -> C# -> Jolt)
 //    --quit-after <s>     exit after <s> seconds (smoke tests / CI)
 //    --screenshot <file>  save a .bmp of the last frame before quitting
@@ -18,6 +20,8 @@
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
+#include "raytracing/PathTracer.h"
+#include "renderer/Renderer.h"
 #include "scene/Testbed.h"
 #include "streaming/SectorStreamer.h"
 
@@ -39,9 +43,11 @@ int main(int argc, char** argv) {
         if (arg == "--quit-after" && i + 1 < argc) quitAfterSeconds = std::atof(argv[++i]);
         else if (arg == "--screenshot" && i + 1 < argc) screenshotPath = argv[++i];
         else if (arg == "--autodrive") autodrive = true;
-        else if (arg == "--no-vsync") config.vsync = false;
+        else if (arg == "--no-vsync") { config.vsync = false; config.maxFps = 0; }
+        else if (arg == "--max-fps" && i + 1 < argc) config.maxFps = std::atoi(argv[++i]);
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
+        else if (arg == "--raster") config.enablePathTracing = false;
     }
 
     mage::Engine engine;
@@ -54,6 +60,7 @@ int main(int argc, char** argv) {
     testbed.Build(engine);
 
     bool showTuning = true;
+    bool showPathTracer = true;
     double elapsed = 0.0;
     bool quitting = false;
     float maxSpeedKmh = 0.0f;
@@ -89,6 +96,15 @@ int main(int argc, char** argv) {
                                 t->position.x, t->position.y, t->position.z, tel.speedKmh, maxSpeedKmh, tel.gear, tel.engineRPM,
                                 tel.wheelsInContact, v->throttle, v->steering);
             }
+            if (const auto* pt = engine.GetRenderer().GetPathTracer(); pt && engine.GetRenderer().Stats().pathTraced) {
+                const mage::PathTracerStats& p = pt->Stats();
+                mage::Log::Info("Path tracer: {}x{}, {} instances, {:.0f} traced FPS ({} frames), GPU {:.2f} ms, latency {:.1f} ms, "
+                                "upload {:.2f} ms, static frames {}, restarts camera {} / scene {}",
+                                p.width, p.height, p.instances, p.tracedFps, p.framesCompleted, p.gpuMs, p.latencyMs, p.uploadMs,
+                                p.staticFrames, p.cameraChanges, p.sceneChanges);
+            }
+            for (const auto& sample : engine.GetProfiler().Samples())
+                mage::Log::Trace("  profile {:<22} avg {:7.3f} ms  peak {:7.3f} ms", sample.name, sample.avgMs, sample.maxMs);
             engine.RequestQuit();
         }
 
@@ -99,6 +115,7 @@ int main(int argc, char** argv) {
     engine.OnImGui = [&] {
         testbed.DrawHud(engine);
         if (showTuning) testbed.DrawTuningWindow(engine, &showTuning);
+        if (showTuning && showPathTracer) testbed.DrawPathTracerWindow(engine, &showPathTracer);
     };
 
     engine.Run();

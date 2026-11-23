@@ -4,6 +4,7 @@
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "renderer/Renderer.h"
+#include "raytracing/PathTracer.h"
 #include "scripting/ScriptHost.h"
 #include "streaming/SectorStreamer.h"
 
@@ -189,6 +190,8 @@ void Testbed::ResetVehicle(Engine& engine) {
 void Testbed::Update(Engine& engine, float dt, bool cameraInputAllowed) {
     Input& input = engine.GetInput();
     if (input.IsKeyPressed(GLFW_KEY_F1)) engine.drawPhysicsDebug = !engine.drawPhysicsDebug;
+    if (input.IsKeyPressedRaw(GLFW_KEY_F3) && engine.GetRenderer().PathTracingAvailable())
+        engine.GetRenderer().pathTracing = !engine.GetRenderer().pathTracing;
     if (input.IsKeyPressed(GLFW_KEY_F2)) {
         cameraMode = cameraMode == CameraMode::Chase ? CameraMode::Fly : CameraMode::Chase;
         if (cameraMode == CameraMode::Fly) flyCamera.SyncFrom(engine.GetCamera());
@@ -290,7 +293,68 @@ void Testbed::DrawTuningWindow(Engine& engine, bool* open) {
 
     ImGui::SeparatorText("Controls");
     ImGui::TextDisabled("W/S throttle & brake/reverse, A/D steer, Space handbrake\n"
-                        "R reset, E spawn crate (C#), F2 chase/fly camera, RMB orbit, wheel zoom");
+                        "R reset, E spawn crate (C#), F2 chase/fly camera, F3 path tracing,\n"
+                        "RMB orbit, wheel zoom");
+    ImGui::End();
+}
+
+void Testbed::DrawPathTracerWindow(Engine& engine, bool* open) {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 480.0f, vp->WorkPos.y + 470.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Path Tracer", open)) {
+        ImGui::End();
+        return;
+    }
+    Renderer& renderer = engine.GetRenderer();
+    PathTracer* pt = renderer.GetPathTracer();
+    if (!pt || !pt->Available()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Hardware path tracing unavailable");
+        if (pt) ImGui::TextWrapped("%s", pt->Stats().error.c_str());
+        ImGui::End();
+        return;
+    }
+    const PathTracerStats& st = pt->Stats();
+    ImGui::Checkbox("Path tracing (F3)", &renderer.pathTracing);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", st.device.c_str());
+    ImGui::Text("%ux%u  %u instances  %.0f traced FPS", st.width, st.height, st.instances, st.tracedFps);
+    ImGui::Text("GPU %.2f ms  latency %.1f ms  upload %.2f ms", st.gpuMs, st.latencyMs, st.uploadMs);
+    const PathTracerSettings& cur = pt->settings;
+    const uint32_t converged = std::min<uint32_t>(st.staticFrames + 1, static_cast<uint32_t>(cur.maxHistory));
+    ImGui::Text("Accumulated: %u frames x %d spp%s", converged, cur.samplesPerPixel,
+                st.staticFrames > 0 ? "  (static - converging)" : "  (moving - temporal denoise)");
+    ImGui::TextDisabled("Restarts: camera %llu, scene %llu", static_cast<unsigned long long>(st.cameraChanges),
+                        static_cast<unsigned long long>(st.sceneChanges));
+
+    PathTracerSettings s = pt->settings;
+    bool reset = false;
+    ImGui::SeparatorText("Light transport");
+    reset |= ImGui::SliderInt("Max bounces", &s.maxBounces, 0, 12);
+    reset |= ImGui::SliderInt("Samples / pixel / frame", &s.samplesPerPixel, 1, 16);
+    ImGui::SliderFloat("Render scale", &s.renderScale, 0.25f, 1.0f, "%.2f");
+    reset |= ImGui::SliderFloat("Sun diameter (deg)", &s.sunAngularDiameterDeg, 0.05f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+    reset |= ImGui::SliderFloat("Sky intensity", &s.skyIntensity, 0.0f, 4.0f);
+    ImGui::SliderFloat("PT exposure", &s.exposure, 0.1f, 4.0f);
+    reset |= ImGui::SliderFloat("Firefly clamp", &s.fireflyClamp, 1.0f, 100.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SeparatorText("Denoiser (SVGF-style)");
+    ImGui::Checkbox("Temporal accumulation", &s.accumulate);
+    ImGui::SameLine();
+    ImGui::Checkbox("Spatial denoise", &s.denoise);
+    ImGui::SliderInt("A-trous iterations", &s.atrousIterations, 0, 8);
+    ImGui::SliderFloat("Color sigma", &s.colorSigma, 0.5f, 16.0f);
+    ImGui::SliderFloat("Moving history alpha", &s.movingMinAlpha, 0.02f, 1.0f);
+    ImGui::SliderInt("Max accumulation", &s.maxHistory, 16, 16384);
+    ImGui::SliderFloat("Static tolerance (m)", &s.staticTolerance, 0.0f, 0.05f, "%.4f");
+    pt->settings = s;
+    if (reset) pt->ResetAccumulation();
+    if (ImGui::Button("Restart accumulation")) pt->ResetAccumulation();
+    ImGui::SeparatorText("Sun & sky (shared with raster)");
+    LightingSettings& l = renderer.lighting;
+    bool lightChanged = ImGui::DragFloat3("Sun direction", &l.sunDirection.x, 0.01f, -1.0f, 1.0f);
+    lightChanged |= ImGui::SliderFloat("Sun intensity", &l.sunIntensity, 0.0f, 12.0f);
+    ImGui::SliderFloat("Exposure", &l.exposure, 0.1f, 4.0f);
+    if (lightChanged && glm::length(l.sunDirection) > 1e-3f) l.sunDirection = glm::normalize(l.sunDirection);
     ImGui::End();
 }
 
@@ -310,7 +374,13 @@ void Testbed::DrawHud(Engine& engine) {
         ImGui::Separator();
         ImGui::Text("%.0f FPS  (%.2f ms)", fs.fps, fs.frameMs);
         ImGui::Text("Physics  %.2f ms  bodies %u (active %u)", ps.lastStepMs, ps.numBodies, ps.numActiveBodies);
-        ImGui::Text("Draws    %u  culled %u  shadow %u", rs.drawn, rs.culled, rs.shadowCasters);
+        if (rs.pathTraced) {
+            const PathTracerStats& pts = engine.GetRenderer().GetPathTracer()->Stats();
+            ImGui::TextColored(ImVec4(0.45f, 1.0f, 0.55f, 1.0f), "Path traced  %ux%u  %.0f fps  GPU %.2f ms  %u inst.", pts.width,
+                               pts.height, pts.tracedFps, pts.gpuMs, pts.instances);
+        } else {
+            ImGui::Text("Raster   draws %u  culled %u  shadow %u", rs.drawn, rs.culled, rs.shadowCasters);
+        }
         ImGui::Text("Sectors  %zu loaded, %zu pending  @ (%d, %d)", ss.loaded, ss.pending, ss.focusSector.x, ss.focusSector.z);
         ImGui::Text("Entities %zu   Scripts %s", engine.GetRegistry().AliveCount(),
                     engine.GetScriptHost().IsReady() ? ".NET" : "off");

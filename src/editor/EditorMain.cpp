@@ -63,6 +63,7 @@ public:
         if (m_showTuning) m_testbed.DrawTuningWindow(m_engine, &m_showTuning);
         if (m_showStreaming) DrawStreamingPanel();
         if (m_showRenderer) DrawRendererPanel();
+        if (m_showPathTracer) m_testbed.DrawPathTracerWindow(m_engine, &m_showPathTracer);
         if (m_showProfiler) DrawProfiler();
         if (m_showConsole) DrawConsole();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
@@ -88,6 +89,7 @@ private:
         ImGui::DockBuilderDockWindow("Inspector", rightTop);
         ImGui::DockBuilderDockWindow("Vehicle Tuning", rightBottom);
         ImGui::DockBuilderDockWindow("Physics", rightBottom);
+        ImGui::DockBuilderDockWindow("Path Tracer", rightBottom);
         ImGui::DockBuilderDockWindow("Console", bottom);
         ImGui::DockBuilderDockWindow("Profiler", bottom);
         ImGui::DockBuilderDockWindow("Streaming", bottom);
@@ -118,6 +120,7 @@ private:
             ImGui::MenuItem("Vehicle Tuning", nullptr, &m_showTuning);
             ImGui::MenuItem("Streaming", nullptr, &m_showStreaming);
             ImGui::MenuItem("Renderer", nullptr, &m_showRenderer);
+            ImGui::MenuItem("Path Tracer", nullptr, &m_showPathTracer);
             ImGui::MenuItem("Profiler", nullptr, &m_showProfiler);
             ImGui::MenuItem("Console", nullptr, &m_showConsole);
             ImGui::Separator();
@@ -486,6 +489,7 @@ private:
     bool m_layoutChecked = false;
     bool m_showHierarchy = true, m_showInspector = true, m_showPhysics = true, m_showTuning = true;
     bool m_showStreaming = true, m_showRenderer = true, m_showProfiler = true, m_showConsole = true, m_showDemo = false;
+    bool m_showPathTracer = true;
     bool m_hideSectorEntities = true;
     bool m_autoScroll = true;
     char m_filter[64] = {};

@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+//
+// Temporal accumulation (SVGF-style): reprojects last frame's history with the previous
+// view-projection, validates it with position/normal tests and blends. While nothing in the
+// scene or camera changes, accumulation is unbounded (up to 'max history'), so the image
+// converges to the ground-truth path traced result.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ImageSize();
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    uint cur = CurrentIndex(), prev = PreviousIndex();
+    uint flags = ubo.params0.w;
+    bool isStatic = (flags & FLAG_STATIC) != 0u;
+    bool reset = (flags & FLAG_RESET) != 0u;
+    bool accumulate = (flags & FLAG_ACCUMULATE) != 0u;
+
+    vec3 illum = imageLoad(noisyIllum, px).rgb;
+    vec4 pos = imageLoad(gPos[cur], px);
+    vec3 normal = imageLoad(gNormal[cur], px).xyz;
+    float lum = Luminance(illum);
+
+    bool valid = false;
+    ivec2 prevPx = px;
+    if (!reset && accumulate) {
+        if (isStatic) {
+            valid = true; // identical camera + scene: same pixel, no validation (keeps silhouettes converging)
+        } else if (pos.w > 0.0) {
+            vec4 clip = ubo.prevViewProj * vec4(pos.xyz, 1.0);
+            if (clip.w > 0.0) {
+                vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+                prevPx = ivec2(floor(uv * vec2(size)));
+                if (all(greaterThanEqual(prevPx, ivec2(0))) && all(lessThan(prevPx, size))) {
+                    vec4 prevPos = imageLoad(gPos[prev], prevPx);
+                    vec3 prevNormal = imageLoad(gNormal[prev], prevPx).xyz;
+                    float dist = length(pos.xyz - ubo.cameraPos.xyz);
+                    valid = prevPos.w > 0.0 && length(prevPos.xyz - pos.xyz) < 0.01 * dist + 0.05 &&
+                            dot(prevNormal, normal) > 0.9;
+                }
+            }
+        } else {
+            valid = imageLoad(gPos[prev], px).w == 0.0; // sky stays sky
+        }
+    }
+
+    vec3 color = illum;
+    vec2 moments = vec2(lum, lum * lum);
+    float historyLength = 1.0;
+    if (valid) {
+        vec4 hc = imageLoad(historyColor[prev], prevPx);
+        vec4 hm = imageLoad(historyMoments[prev], prevPx);
+        historyLength = min(hm.z + 1.0, ubo.params1.y);
+        float alpha = isStatic ? 1.0 / historyLength : max(1.0 / historyLength, ubo.params1.w);
+        float alphaMoments = max(1.0 / historyLength, 0.2);
+        color = mix(hc.rgb, illum, alpha);
+        moments = mix(hm.xy, moments, isStatic ? 1.0 / historyLength : alphaMoments);
+    }
+
+    float variance = max(moments.y - moments.x * moments.x, 0.0);
+    if (historyLength < 4.0) variance = max(variance, 4.0 / historyLength); // young history: filter harder
+
+    imageStore(historyColor[cur], px, vec4(color, 1.0));
+    imageStore(historyMoments[cur], px, vec4(moments, historyLength, 0.0));
+    imageStore(filterTemp[0], px, vec4(color, variance));
+}

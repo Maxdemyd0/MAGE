@@ -41,7 +41,7 @@ void Write(LogLevel level, std::string_view message) {
     std::lock_guard lock(s.mutex);
     std::FILE* stream = level >= LogLevel::Warn ? stderr : stdout;
     std::fprintf(stream, "[%9.3f] [%s] %.*s\n", t, LevelTag(level), static_cast<int>(message.size()), message.data());
-    if (level >= LogLevel::Warn) std::fflush(stream);
+    std::fflush(stream); // keep logs intact if the process crashes
 
     s.entries.push_back(LogEntry{level, t, std::string(message)});
     if (s.entries.size() > kMaxEntries) s.entries.pop_front();

@@ -57,11 +57,14 @@ public:
     MeshHandle Add(const std::string& name, const MeshData& data);
     MeshHandle Find(const std::string& name) const;
     const Mesh* Get(MeshHandle handle) const;
+    // CPU copy of the geometry (used to build ray tracing acceleration structures).
+    const MeshData* GetData(MeshHandle handle) const;
     const std::vector<Mesh>& All() const { return m_meshes; }
     void Destroy();
 
 private:
     std::vector<Mesh> m_meshes;
+    std::vector<MeshData> m_data;
     std::unordered_map<std::string, MeshHandle> m_byName;
 };
 

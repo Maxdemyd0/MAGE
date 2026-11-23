@@ -25,6 +25,7 @@ public:
     void ResetVehicle(Engine& engine);
     void DrawTuningWindow(Engine& engine, bool* open = nullptr);
     void DrawHud(Engine& engine);
+    void DrawPathTracerWindow(Engine& engine, bool* open = nullptr);
 
     Entity Vehicle() const { return m_vehicle; }
     bool UsingNativeController(Engine& engine) const;

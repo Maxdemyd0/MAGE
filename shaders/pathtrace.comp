@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+//
+// MAGE hardware path tracer (VK_KHR_ray_query on RT cores).
+//   * GGX (VNDF-sampled) specular + Lambert diffuse, metallic/roughness workflow
+//   * next-event estimation of a finite-size sun (soft shadows), sky environment light
+//   * emissive surfaces, Russian roulette, firefly clamp
+//   * writes demodulated illumination + G-buffer for the SVGF-style denoiser
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+struct SurfaceHit {
+    vec3 position;
+    vec3 normal;     // shading normal, facing the incoming ray
+    vec3 geoNormal;  // geometric normal, facing the incoming ray
+    vec3 albedo;
+    vec3 emission;
+    float metallic;
+    float roughness;
+    float t;
+};
+
+vec3 VertexPosition(uint i) { return vec3(vertices[i * 8u + 0u], vertices[i * 8u + 1u], vertices[i * 8u + 2u]); }
+vec3 VertexNormal(uint i) { return vec3(vertices[i * 8u + 3u], vertices[i * 8u + 4u], vertices[i * 8u + 5u]); }
+
+bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 1e-3, dir, 1e5);
+    while (rayQueryProceedEXT(rq)) {}
+    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
+
+    int instanceId = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+    int prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+    mat4x3 worldToObject = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+    hit.t = rayQueryGetIntersectionTEXT(rq, true);
+
+    Instance inst = instances[instanceId];
+    uvec4 mesh = meshes[inst.ids.x];
+    uint base = mesh.x + uint(prim) * 3u;
+    uint i0 = indices[base] + mesh.y, i1 = indices[base + 1u] + mesh.y, i2 = indices[base + 2u] + mesh.y;
+
+    vec3 w = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    vec3 nObj = VertexNormal(i0) * w.x + VertexNormal(i1) * w.y + VertexNormal(i2) * w.z;
+    vec3 p0 = VertexPosition(i0);
+    vec3 ngObj = cross(VertexPosition(i1) - p0, VertexPosition(i2) - p0);
+
+    mat3 normalMatrix = transpose(mat3(worldToObject));
+    vec3 ng = normalize(normalMatrix * ngObj);
+    vec3 n = normalize(normalMatrix * nObj);
+    if (dot(ng, dir) > 0.0) ng = -ng;            // two-sided
+    if (dot(n, ng) < 0.0) n = reflect(n, ng);    // keep the shading normal in the ray's hemisphere
+
+    hit.position = origin + dir * hit.t;
+    hit.normal = n;
+    hit.geoNormal = ng;
+    hit.albedo = inst.albedoMetallic.rgb;
+    hit.metallic = inst.albedoMetallic.a;
+    hit.emission = inst.emissionRoughness.rgb;
+    hit.roughness = clamp(inst.emissionRoughness.a, 0.04, 1.0);
+    float checker = inst.misc.x;
+    if (checker > 0.0) {
+        vec2 cell = floor(hit.position.xz / checker);
+        float k = mod(cell.x + cell.y, 2.0);
+        vec2 f = fract(hit.position.xz / (checker * 8.0));
+        float line = step(0.995, max(f.x, f.y)) + step(max(f.x, f.y), 0.005);
+        hit.albedo *= mix(0.55, 1.0, k) * (1.0 - 0.35 * clamp(line, 0.0, 1.0));
+    }
+    return true;
+}
+
+bool Visible(vec3 origin, vec3 dir) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 1e-3, dir, 1e5);
+    while (rayQueryProceedEXT(rq)) {}
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// ---------------------------------------------------------------------------- BRDF
+void Basis(vec3 n, out vec3 t, out vec3 b) {
+    float s = n.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (s + n.z);
+    float c = n.x * n.y * a;
+    t = vec3(1.0 + s * n.x * n.x * a, s * c, -s * n.x);
+    b = vec3(c, s + n.y * n.y * a, -n.y);
+}
+
+vec3 FresnelSchlick(float cosTheta, vec3 f0) { return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
+
+float D_GGX(float NdotH, float a2) {
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+float G1_Smith(float NdotX, float a2) {
+    return 2.0 * NdotX / (NdotX + sqrt(a2 + (1.0 - a2) * NdotX * NdotX));
+}
+
+vec3 EvalBRDF(SurfaceHit h, vec3 V, vec3 L) {
+    float NdotL = dot(h.normal, L), NdotV = dot(h.normal, V);
+    if (NdotL <= 0.0 || NdotV <= 0.0) return vec3(0.0);
+    vec3 H = normalize(V + L);
+    float a = h.roughness * h.roughness;
+    float a2 = max(a * a, 1e-7);
+    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
+    vec3 F = FresnelSchlick(dot(V, H), f0);
+    vec3 spec = F * D_GGX(max(dot(h.normal, H), 0.0), a2) * G1_Smith(NdotV, a2) * G1_Smith(NdotL, a2) / (4.0 * NdotV * NdotL);
+    vec3 diff = (1.0 - F) * (1.0 - h.metallic) * h.albedo / PI;
+    return diff + spec;
+}
+
+// Heitz 2018, "Sampling the GGX Distribution of Visible Normals".
+vec3 SampleGGXVNDF(vec3 Ve, float alpha, float u1, float u2) {
+    vec3 Vh = normalize(vec3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    vec3 T1 = lensq > 0.0 ? vec3(-Vh.y, Vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+    vec3 T2 = cross(Vh, T1);
+    float r = sqrt(u1);
+    float phi = 2.0 * PI * u2;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(1.0 - t1 * t1) + s * t2;
+    vec3 Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+    return normalize(vec3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+// Samples the next direction; returns BRDF * cos / pdf in 'weight'.
+bool SampleBRDF(SurfaceHit h, vec3 V, inout uint rng, out vec3 L, out vec3 weight) {
+    vec3 T, B;
+    Basis(h.normal, T, B);
+    vec3 Vl = vec3(dot(V, T), dot(V, B), dot(V, h.normal));
+    if (Vl.z <= 0.0) return false;
+
+    float a = h.roughness * h.roughness;
+    float a2 = max(a * a, 1e-7);
+    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
+    vec3 Fv = FresnelSchlick(Vl.z, f0);
+    float pSpec = mix(clamp(Luminance(Fv) * 1.5, 0.1, 0.9), 0.95, h.metallic);
+
+    if (Rand(rng) < pSpec) {
+        vec3 Hl = SampleGGXVNDF(Vl, max(a, 0.001), Rand(rng), Rand(rng));
+        vec3 Ll = reflect(-Vl, Hl);
+        if (Ll.z <= 0.0) return false;
+        vec3 F = FresnelSchlick(dot(Vl, Hl), f0);
+        weight = F * G1_Smith(Ll.z, a2) / pSpec; // VNDF: f*cos/pdf = F * G2/G1(V) = F * G1(L)
+        L = normalize(T * Ll.x + B * Ll.y + h.normal * Ll.z);
+    } else {
+        float r = sqrt(Rand(rng));
+        float phi = 2.0 * PI * Rand(rng);
+        vec3 Ll = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
+        weight = (1.0 - Fv) * (1.0 - h.metallic) * h.albedo / (1.0 - pSpec); // cosine-weighted: pi cancels
+        L = normalize(T * Ll.x + B * Ll.y + h.normal * Ll.z);
+    }
+    return dot(L, h.geoNormal) > 0.0;
+}
+
+// Uniformly samples the sun's cone (finite angular size -> soft shadows).
+vec3 SampleSun(inout uint rng) {
+    float cosMax = ubo.sunDir.w;
+    float cosT = 1.0 - Rand(rng) * (1.0 - cosMax);
+    float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+    float phi = 2.0 * PI * Rand(rng);
+    vec3 T, B;
+    Basis(ubo.sunDir.xyz, T, B);
+    return normalize(T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + ubo.sunDir.xyz * cosT);
+}
+
+// ---------------------------------------------------------------------------- main
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ImageSize();
+    if (px.x >= size.x || px.y >= size.y) return;
+
+    uint rng = InitRng(px, ubo.params0.x);
+    uint maxBounces = ubo.params0.y;
+    uint spp = max(ubo.params0.z, 1u);
+    float clampLum = ubo.params1.x;
+    uint cur = CurrentIndex();
+
+    vec3 total = vec3(0.0);
+    vec3 firstAlbedo = vec3(1.0);
+    for (uint s = 0u; s < spp; ++s) {
+        vec2 jitter = vec2(Rand(rng), Rand(rng));
+        vec2 ndc = (vec2(px) + jitter) / vec2(size) * 2.0 - 1.0; // row 0 = bottom (OpenGL texture order)
+        vec4 far = ubo.invViewProj * vec4(ndc, 1.0, 1.0);
+        vec3 origin = ubo.cameraPos.xyz;
+        vec3 dir = normalize(far.xyz / far.w - origin);
+
+        vec3 throughput = vec3(1.0);
+        vec3 radiance = vec3(0.0);
+        for (uint bounce = 0u; bounce <= maxBounces; ++bounce) {
+            SurfaceHit h;
+            if (!TraceClosest(origin, dir, h)) {
+                vec3 sky = SkyGradient(dir) + (bounce == 0u ? SunDisc(dir) : vec3(0.0));
+                vec3 contribution = throughput * sky;
+                if (bounce > 0u && Luminance(contribution) > clampLum) contribution *= clampLum / Luminance(contribution);
+                radiance += contribution;
+                if (bounce == 0u && s == 0u) {
+                    imageStore(gAlbedo, px, vec4(1.0));
+                    imageStore(gEmission, px, vec4(0.0));
+                    imageStore(gNormal[cur], px, vec4(-dir, 1.0));
+                    imageStore(gPos[cur], px, vec4(origin + dir * 1e4, 0.0));
+                    imageStore(gGuide, px, vec4(-dir, -1.0));
+                }
+                break;
+            }
+
+            vec3 V = -dir;
+            if (bounce == 0u) {
+                // Primary emission is stored separately (noise-free) and added in the composite pass.
+                if (s == 0u) {
+                    firstAlbedo = max(h.albedo, vec3(0.03));
+                    imageStore(gAlbedo, px, vec4(firstAlbedo, 1.0));
+                    imageStore(gEmission, px, vec4(h.emission, 0.0));
+                    imageStore(gNormal[cur], px, vec4(h.normal, h.roughness));
+                    imageStore(gPos[cur], px, vec4(h.position, 1.0));
+                    imageStore(gGuide, px, vec4(h.normal, h.t));
+                }
+            } else {
+                vec3 e = throughput * h.emission;
+                if (Luminance(e) > clampLum) e *= clampLum / Luminance(e);
+                radiance += e;
+            }
+
+            vec3 offsetOrigin = h.position + h.geoNormal * (1e-3 + h.t * 1e-5);
+
+            // Next-event estimation: the sun.
+            vec3 L = SampleSun(rng);
+            if (dot(L, h.geoNormal) > 0.0 && dot(L, h.normal) > 0.0 && Visible(offsetOrigin, L)) {
+                vec3 c = throughput * EvalBRDF(h, V, L) * dot(h.normal, L) * ubo.sunColor.rgb;
+                if (bounce > 0u && Luminance(c) > clampLum) c *= clampLum / Luminance(c);
+                radiance += c;
+            }
+
+            if (bounce == maxBounces) break;
+            vec3 weight;
+            if (!SampleBRDF(h, V, rng, dir, weight)) break;
+            throughput *= weight;
+            origin = offsetOrigin;
+
+            if (bounce >= 2u) { // Russian roulette
+                float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+                if (Rand(rng) > p) break;
+                throughput /= p;
+            }
+        }
+        total += radiance;
+    }
+
+    vec3 illumination = total / float(spp);
+    imageStore(noisyIllum, px, vec4(illumination / firstAlbedo, 1.0)); // demodulated
+}

@@ -97,10 +97,21 @@ bool Engine::Init(const EngineConfig& config) {
     }
 
     m_renderer = std::make_unique<Renderer>();
-    if (!m_renderer->Init()) {
+    if (!m_renderer->Init(config.enablePathTracing ? exeDir / "shaders" : std::filesystem::path{})) {
         Log::Error("Renderer initialization failed");
         return false;
     }
+    // Creating the Vulkan device (driver layers / overlay hooks) can unbind the GL context on
+    // this thread; make sure it is current again before anything else touches OpenGL.
+    // GLFW only tracks its own bookkeeping, so query the real driver state where possible.
+#if defined(_WIN32)
+    const bool contextLost = wglGetCurrentContext() == nullptr;
+#else
+    const bool contextLost = glfwGetCurrentContext() != m_window->Handle();
+#endif
+    if (contextLost) Log::Warn("OpenGL context was unbound during Vulkan initialization - restoring it");
+    glfwMakeContextCurrent(nullptr);
+    glfwMakeContextCurrent(m_window->Handle());
 
     m_input.Attach(m_window->Handle());
     InitImGui();
@@ -275,6 +286,15 @@ void Engine::Run() {
         }
         RenderFrame();
         ++m_stats.frameIndex;
+
+        // Frame cap: sleep coarsely, then spin for the last fraction of a millisecond.
+        if (m_config.maxFps > 0) {
+            const auto target = now + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / m_config.maxFps));
+            while (Clock::now() < target) {
+                if (target - Clock::now() > std::chrono::milliseconds(2)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                else std::this_thread::yield();
+            }
+        }
     }
 }
 

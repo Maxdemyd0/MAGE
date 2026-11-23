@@ -32,6 +32,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(Dependencies)
 include(DotNet)
+include(Vulkan)
 
 # -----------------------------------------------------------------------------
 #  MAGE_Engine - the core engine library (shared by default)
@@ -50,6 +51,7 @@ set(MAGE_ENGINE_SOURCES
     src/renderer/Shader.h           src/renderer/Shader.cpp
     src/renderer/Renderer.h         src/renderer/Renderer.cpp
     src/renderer/PhysicsDebugRenderer.h src/renderer/PhysicsDebugRenderer.cpp
+    src/raytracing/PathTracer.h     src/raytracing/PathTracer.cpp
     src/physics/PhysicsWorld.h      src/physics/PhysicsWorld.cpp
     src/streaming/SectorStreamer.h  src/streaming/SectorStreamer.cpp
     src/scripting/InteropTypes.h
@@ -94,8 +96,17 @@ target_compile_definitions(MAGE_Engine
 )
 target_link_libraries(MAGE_Engine
     PUBLIC  glm::glm
-    PRIVATE glfw Jolt nlohmann_json::nlohmann_json
+    PRIVATE glfw Jolt nlohmann_json::nlohmann_json $<$<PLATFORM_ID:Windows>:opengl32>
 )
+if(MAGE_HAS_VULKAN_RT)
+    target_sources(MAGE_Engine PRIVATE
+        src/raytracing/VulkanContext.h src/raytracing/VulkanContext.cpp
+        src/raytracing/VulkanMemory.cpp
+        "${MAGE_VOLK_SOURCE}")
+    set_source_files_properties("${MAGE_VOLK_SOURCE}" src/raytracing/VulkanMemory.cpp PROPERTIES COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:MSVC>:/W0>")
+    target_link_libraries(MAGE_Engine PRIVATE mage_vulkan)
+    add_dependencies(MAGE_Engine MAGE_Shaders)
+endif()
 if(MAGE_HAS_DOTNET)
     target_compile_definitions(MAGE_Engine PRIVATE MAGE_HAS_DOTNET=1)
     target_link_libraries(MAGE_Engine PRIVATE mage_nethost)
@@ -148,4 +159,4 @@ if(MSVC)
     set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MAGE_Runtime)
 endif()
 
-message(STATUS "MAGE: shared engine ${MAGE_BUILD_SHARED}, C# scripting ${MAGE_HAS_DOTNET}  (binaries -> ${CMAKE_BINARY_DIR}/bin/<Config>)")
+message(STATUS "MAGE: shared engine ${MAGE_BUILD_SHARED}, Vulkan RT ${MAGE_HAS_VULKAN_RT}, C# scripting ${MAGE_HAS_DOTNET}  (binaries -> ${CMAKE_BINARY_DIR}/bin/<Config>)")

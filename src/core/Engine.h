@@ -42,11 +42,13 @@ struct EngineConfig {
     int width = 1600;
     int height = 900;
     bool vsync = true;
+    int maxFps = 240;               // frame cap (0 = unlimited); protects the GPU when vsync is overridden
     double fixedHz = 60.0;
     int maxFixedStepsPerFrame = 5;
     bool editorMode = false;        // render the scene into an off-screen viewport texture
     bool enableScripting = true;
     bool enableStreaming = true;
+    bool enablePathTracing = true;  // Vulkan RT path tracer when the GPU supports it
     std::filesystem::path assetDirectory;   // empty = auto (<exe>/assets, then source tree)
     std::filesystem::path scriptDirectory;  // empty = <exe>/Scripts
 };
