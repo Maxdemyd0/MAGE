@@ -1,0 +1,44 @@
+#pragma once
+// MAGE v1 - GLFW window + OpenGL context.
+
+#include <string>
+
+struct GLFWwindow;
+
+namespace mage {
+
+class Window {
+public:
+    Window() = default;
+    ~Window();
+    Window(const Window&) = delete;
+    Window& operator=(const Window&) = delete;
+
+    bool Create(const std::string& title, int width, int height, bool vsync);
+    void Destroy();
+
+    bool ShouldClose() const;
+    void RequestClose();
+    void PollEvents();
+    void SwapBuffers();
+
+    void GetFramebufferSize(int& width, int& height) const;
+    float GetContentScale() const;
+    bool IsMinimized() const;
+
+    void SetVSync(bool enabled);
+    bool VSync() const { return m_vsync; }
+    void SetTitle(const std::string& title);
+
+    int GLMajor() const { return m_glMajor; }
+    int GLMinor() const { return m_glMinor; }
+    GLFWwindow* Handle() const { return m_window; }
+
+private:
+    GLFWwindow* m_window = nullptr;
+    bool m_vsync = true;
+    int m_glMajor = 0;
+    int m_glMinor = 0;
+};
+
+} // namespace mage

@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Game-side scripts. Built next to Mage.Core.dll in <bin>/Scripts and loaded by the engine. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>GameScripts</AssemblyName>
+    <RootNamespace>GameScripts</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Private=false: Mage.Core.dll is provided by the engine's Scripts folder. -->
+    <ProjectReference Include="..\Mage.Core\Mage.Core.csproj" Private="false" />
+  </ItemGroup>
+
+</Project>

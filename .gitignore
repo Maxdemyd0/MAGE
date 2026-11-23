@@ -1,0 +1,20 @@
+# CMake / build output
+build/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+
+# .NET
+scripting/**/bin/
+scripting/**/obj/
+*.user
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# Runtime artifacts
+mage_*.ini
+mage_screenshot_*.bmp
+imgui.ini

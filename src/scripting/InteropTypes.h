@@ -1,0 +1,82 @@
+#pragma once
+// MAGE v1 - C++ <-> C# interop ABI.
+//
+// !!! Every struct here is mirrored 1:1 in scripting/Mage.Core/InternalCalls.cs !!!
+// Field order, types and sizes must match exactly (sequential layout, natural alignment,
+// 64-bit function pointers). Bump kInteropVersion whenever the layout changes.
+
+#include <cstdint>
+
+namespace mage::interop {
+
+inline constexpr uint32_t kInteropVersion = 1;
+
+struct NVec3 { float x, y, z; };
+struct NQuat { float x, y, z, w; };
+
+struct NRaycastHit {
+    NVec3 point;
+    NVec3 normal;
+    float distance;
+    uint32_t entity;   // 0xFFFFFFFF when the hit body has no entity
+};
+
+struct NVehicleState {
+    float speedKmh;
+    float forwardSpeed;
+    float engineRPM;
+    int32_t gear;
+    int32_t wheelsInContact;
+};
+
+// ---- Native functions exposed to C# (called through `delegate* unmanaged<...>`) ----
+using FnLog                = void (*)(int32_t level, const char* utf8Message);
+using FnGetEntityTransform = void (*)(uint32_t entity, NVec3* outPosition, NQuat* outRotation);
+using FnSetEntityTransform = void (*)(uint32_t entity, const NVec3* position, const NQuat* rotation);
+using FnApplyVehicleInput  = void (*)(uint32_t entity, float throttle, float steering, float brake, float handBrake);
+using FnGetVehicleState    = int32_t (*)(uint32_t entity, NVehicleState* outState);
+using FnRaycastWorld       = int32_t (*)(const NVec3* origin, const NVec3* direction, float maxDistance,
+                                         uint32_t ignoreEntity, NRaycastHit* outHit);
+using FnSpawnEntity        = uint32_t (*)(const char* utf8Mesh, const NVec3* position, const NQuat* rotation,
+                                          const NVec3* scale, int32_t dynamic);
+using FnDestroyEntity      = void (*)(uint32_t entity);
+using FnIsKeyDown          = int32_t (*)(int32_t key);
+using FnIsKeyPressed       = int32_t (*)(int32_t key);
+using FnEntityExists       = int32_t (*)(uint32_t entity);
+
+struct NativeBindings {
+    uint32_t structSize;
+    uint32_t version;
+    FnLog Log;
+    FnGetEntityTransform GetEntityTransform;
+    FnSetEntityTransform SetEntityTransform;
+    FnApplyVehicleInput ApplyVehicleInput;
+    FnGetVehicleState GetVehicleState;
+    FnRaycastWorld RaycastWorld;
+    FnSpawnEntity SpawnEntity;
+    FnDestroyEntity DestroyEntity;
+    FnIsKeyDown IsKeyDown;
+    FnIsKeyPressed IsKeyPressed;
+    FnEntityExists EntityExists;
+};
+
+// ---- Managed entry points filled in by C# ScriptEngine.Initialize ----
+struct ManagedCallbacks {
+    int32_t (*CreateScript)(uint32_t entity, const char* utf8ClassName);
+    void (*DestroyScript)(uint32_t entity);
+    void (*OnUpdate)(float dt);
+    void (*OnFixedUpdate)(float fixedDt);
+    void (*Shutdown)();
+};
+
+// int Mage.Interop.ScriptEngine.Initialize(NativeBindings*, ManagedCallbacks*)
+using FnManagedInitialize = int32_t (*)(const NativeBindings* bindings, ManagedCallbacks* outCallbacks);
+
+static_assert(sizeof(NVec3) == 12);
+static_assert(sizeof(NQuat) == 16);
+static_assert(sizeof(NRaycastHit) == 32);
+static_assert(sizeof(NVehicleState) == 20);
+static_assert(sizeof(NativeBindings) == 8 + 11 * sizeof(void*));
+static_assert(sizeof(ManagedCallbacks) == 5 * sizeof(void*));
+
+} // namespace mage::interop
