@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - asynchronous 2D grid world streamer.
 //
 // The world is cut into square sectors on the XZ plane. Every frame the main thread calls
@@ -82,7 +83,7 @@ struct StreamerStats {
     SectorCoord focusSector;
 };
 
-class SectorStreamer {
+class MAGE_API SectorStreamer {
 public:
     using LoadedCallback = std::function<void(const SectorData&)>;
     using UnloadedCallback = std::function<void(const SectorCoord&)>;

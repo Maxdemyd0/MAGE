@@ -18,3 +18,4 @@ scripting/**/obj/
 mage_*.ini
 mage_screenshot_*.bmp
 imgui.ini
+build-*/

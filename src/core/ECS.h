@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - lightweight sparse-set Entity Component System.
 //
 // Entities are 32-bit handles: 20-bit index + 12-bit generation (stale handles are detected).
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -41,7 +43,7 @@ struct TransformComponent {
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f}; // (w, x, y, z)
     glm::vec3 scale{1.0f};
 
-    glm::mat4 Matrix() const;
+    MAGE_API glm::mat4 Matrix() const;
 };
 
 struct MeshComponent {
@@ -89,13 +91,12 @@ struct SectorComponent {
 
 // ============================================================================ Pools
 namespace detail {
-inline uint32_t NextComponentTypeId() {
-    static uint32_t counter = 0;
-    return counter++;
-}
+// Component type ids are assigned by name inside MAGE_Engine, so the engine DLL and every
+// executable/plugin that instantiates Registry templates agree on the same id per type.
+MAGE_API uint32_t ComponentTypeIdFromName(const char* uniqueTypeName);
 template <class T>
 uint32_t ComponentTypeId() {
-    static const uint32_t id = NextComponentTypeId();
+    static const uint32_t id = ComponentTypeIdFromName(typeid(T).name());
     return id;
 }
 } // namespace detail
@@ -163,8 +164,14 @@ private:
 };
 
 // ============================================================================ Registry
-class Registry {
+class MAGE_API Registry {
 public:
+    Registry() = default;
+    Registry(const Registry&) = delete;
+    Registry& operator=(const Registry&) = delete;
+    Registry(Registry&&) noexcept = default;
+    Registry& operator=(Registry&&) noexcept = default;
+
     Entity Create();
     void Destroy(Entity e);
     bool Valid(Entity e) const;

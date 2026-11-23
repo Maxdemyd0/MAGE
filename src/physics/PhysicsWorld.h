@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - physics world built on Jolt Physics (JPH::PhysicsSystem).
 //
 // Jolt types never leak through this header; all engine code talks in glm + handles.
@@ -94,7 +95,7 @@ struct PhysicsStats {
     int workerThreads = 0;
 };
 
-class PhysicsWorld {
+class MAGE_API PhysicsWorld {
 public:
     PhysicsWorld();
     ~PhysicsWorld();

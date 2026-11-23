@@ -22,6 +22,8 @@ cmake --build build --config Release --parallel
 
 The first configure downloads all dependencies with `FetchContent`. The build also compiles the C# assemblies
 (`dotnet build`) into `bin/<Config>/Scripts/` and copies `assets/` and `nethost.dll` next to the executables.
+`MAGE_Engine` is built as a shared library by default. The executables load `MAGE_Engine.dll` from their own folder.
+Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Controls
 
@@ -52,7 +54,7 @@ Automated smoke test:
 ## Architecture
 
 ```
-MAGE_Engine (static lib)
+MAGE_Engine (shared library: MAGE_Engine.dll / .so; exports the MAGE_API classes and Dear ImGui)
  src/core/        Engine (60 Hz fixed step + interpolated variable-rate render, profiling timers),
                   sparse-set ECS, Window, Input, Camera (+ chase / fly controllers), Log, Profiler
  src/renderer/    OpenGL 4.x forward PBR renderer: GGX sun + hemispheric ambient, shadow map with PCF,
@@ -119,9 +121,10 @@ MAGE is free and open-source software, licensed under the **GNU Lesser General P
 * **Your game can be closed source.** Games and tools that only *use* MAGE can ship under any license, including
   proprietary or commercial ones, provided you:
   * include the LGPL/GPL texts and a notice that MAGE is used,
-  * keep MAGE replaceable, so a user can rebuild your game against a modified MAGE. The simplest way is to use it as
-    a shared library (`MAGE_Engine` is built as a static library by default; if you link it statically, ship your
-    game's object files or another way to relink),
+  * keep MAGE replaceable, so a user can swap in a modified build. MAGE does this for you by default:
+    `MAGE_Engine` is a shared library (`MAGE_Engine.dll` / `libMAGE_Engine.so`), so shipping that DLL unmodified
+    next to your game is enough. With `-DMAGE_BUILD_SHARED=OFF` (static linking), you must also ship your game's
+    object files or another way to relink,
   * provide (or offer) the source of the MAGE version you shipped.
   C# gameplay scripts that reference `Mage.Core.dll` are separate assemblies and can use any license.
 * Contributions are accepted under the same license with a DCO sign-off and no CLA (see [CONTRIBUTING.md](CONTRIBUTING.md)).

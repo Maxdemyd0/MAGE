@@ -19,6 +19,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(MAGE_ENABLE_DOTNET "Embed the .NET CoreCLR runtime for C# scripting" ON)
+option(MAGE_BUILD_SHARED "Build MAGE_Engine as a shared library (DLL/.so) - recommended for LGPL compliance" ON)
 
 # Dynamic CRT everywhere (Jolt defaults to the static CRT, which we override).
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -33,9 +34,10 @@ include(Dependencies)
 include(DotNet)
 
 # -----------------------------------------------------------------------------
-#  MAGE_Engine - the core engine library
+#  MAGE_Engine - the core engine library (shared by default)
 # -----------------------------------------------------------------------------
 set(MAGE_ENGINE_SOURCES
+    src/core/Export.h
     src/core/Log.h                  src/core/Log.cpp
     src/core/Profiler.h
     src/core/Window.h               src/core/Window.cpp
@@ -55,8 +57,32 @@ set(MAGE_ENGINE_SOURCES
     src/scene/Testbed.h             src/scene/Testbed.cpp
 )
 
-add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES})
-target_include_directories(MAGE_Engine PUBLIC "${CMAKE_SOURCE_DIR}/src")
+if(MAGE_BUILD_SHARED)
+    add_library(MAGE_Engine SHARED ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui>)
+    set_target_properties(MAGE_Engine PROPERTIES
+        DEFINE_SYMBOL MAGE_ENGINE_BUILD
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        VERSION ${PROJECT_VERSION}
+        SOVERSION ${PROJECT_VERSION_MAJOR})
+    target_compile_definitions(MAGE_Engine INTERFACE MAGE_ENGINE_SHARED)
+    if(WIN32)
+        set(_imgui_export "__declspec(dllexport)")
+        set(_imgui_import "__declspec(dllimport)")
+    else()
+        set(_imgui_export "__attribute__((visibility(\"default\")))")
+        set(_imgui_import "${_imgui_export}")
+    endif()
+    target_compile_definitions(mage_imgui PRIVATE "IMGUI_API=${_imgui_export}")
+    target_compile_definitions(MAGE_Engine PRIVATE "IMGUI_API=${_imgui_export}" INTERFACE "IMGUI_API=${_imgui_import}")
+else()
+    add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui>)
+endif()
+
+target_include_directories(MAGE_Engine PUBLIC
+    "${CMAKE_SOURCE_DIR}/src"
+    $<TARGET_PROPERTY:mage_imgui,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:glfw,INTERFACE_INCLUDE_DIRECTORIES>)   # GLFW key codes for apps
 target_compile_definitions(MAGE_Engine
     PUBLIC
         GLFW_INCLUDE_NONE
@@ -67,8 +93,8 @@ target_compile_definitions(MAGE_Engine
         $<$<PLATFORM_ID:Windows>:NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS>
 )
 target_link_libraries(MAGE_Engine
-    PUBLIC  glfw glm::glm mage_imgui
-    PRIVATE Jolt nlohmann_json::nlohmann_json
+    PUBLIC  glm::glm
+    PRIVATE glfw Jolt nlohmann_json::nlohmann_json
 )
 if(MAGE_HAS_DOTNET)
     target_compile_definitions(MAGE_Engine PRIVATE MAGE_HAS_DOTNET=1)
@@ -80,6 +106,8 @@ endif()
 
 if(MSVC)
     target_compile_options(MAGE_Engine PRIVATE /W3 /permissive- /utf-8 /Zc:__cplusplus /MP)
+    # Exported classes hold STL members; safe because every module shares the same /MD CRT.
+    target_compile_options(MAGE_Engine PUBLIC /wd4251 /wd4275)
 else()
     target_compile_options(MAGE_Engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -120,4 +148,4 @@ if(MSVC)
     set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MAGE_Runtime)
 endif()
 
-message(STATUS "MAGE: C# scripting ${MAGE_HAS_DOTNET}  (binaries -> ${CMAKE_BINARY_DIR}/bin/<Config>)")
+message(STATUS "MAGE: shared engine ${MAGE_BUILD_SHARED}, C# scripting ${MAGE_HAS_DOTNET}  (binaries -> ${CMAKE_BINARY_DIR}/bin/<Config>)")

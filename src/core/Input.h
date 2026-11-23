@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - keyboard / mouse input. Key codes are GLFW key codes (also used by C# KeyCode).
 
 #include <array>
@@ -11,7 +12,7 @@ struct GLFWwindow;
 
 namespace mage {
 
-class Input {
+class MAGE_API Input {
 public:
     static constexpr int kMaxKeys = 512;
     static constexpr int kMaxButtons = 8;

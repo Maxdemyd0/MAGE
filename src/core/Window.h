@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - GLFW window + OpenGL context.
 
 #include <string>
@@ -9,7 +10,7 @@ struct GLFWwindow;
 
 namespace mage {
 
-class Window {
+class MAGE_API Window {
 public:
     Window() = default;
     ~Window();

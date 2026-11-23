@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - forward PBR renderer (OpenGL 4.x core).
 //
 //   * Cook-Torrance GGX directional sun + hemispheric ambient, ACES tonemapping
@@ -65,7 +66,7 @@ struct RenderTarget {
     int height = 0;
 };
 
-class Renderer {
+class MAGE_API Renderer {
 public:
     Renderer() = default;
     ~Renderer();

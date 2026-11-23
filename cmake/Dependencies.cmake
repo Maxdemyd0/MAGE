@@ -2,6 +2,8 @@
 #  Third-party dependencies (all fetched at configure time via FetchContent)
 # =============================================================================
 include(FetchContent)
+# Everything ends up inside MAGE_Engine.so/.dll, so static deps must be position independent.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(FETCHCONTENT_QUIET OFF)
 
 # ---- GLFW (windowing & input) ------------------------------------------------
@@ -57,8 +59,10 @@ FetchContent_Declare(imgui
 
 FetchContent_MakeAvailable(glfw glm nlohmann_json JoltPhysics imgui)
 
-# ImGui ships no CMake project: build it (+ GLFW/OpenGL3 backends) ourselves.
-add_library(mage_imgui STATIC
+# ImGui ships no CMake project: compile it (+ GLFW/OpenGL3 backends) as an OBJECT library
+# that is linked *into* MAGE_Engine. In shared builds ImGui is exported from MAGE_Engine.dll,
+# so the engine and the applications share one ImGui context.
+add_library(mage_imgui OBJECT
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -67,7 +71,7 @@ add_library(mage_imgui STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
 target_include_directories(mage_imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_link_libraries(mage_imgui PUBLIC glfw)
+target_link_libraries(mage_imgui PRIVATE glfw)
 target_compile_definitions(mage_imgui PUBLIC GLFW_INCLUDE_NONE)
 
 foreach(dep glfw Jolt mage_imgui)

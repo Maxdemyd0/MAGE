@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - vertical-slice testbed scene: checkerboard ground, ramps, props and a drivable
 // 4-wheel raycast vehicle controlled from C# (GameScripts.TestVehicleScript).
 // Shared by MAGE_Runtime and MAGE_Editor.
@@ -13,7 +14,7 @@ namespace mage {
 
 class Engine;
 
-class Testbed {
+class MAGE_API Testbed {
 public:
     static constexpr const char* kVehicleScript = "GameScripts.TestVehicleScript";
 

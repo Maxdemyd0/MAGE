@@ -4,7 +4,19 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
 namespace mage {
+
+uint32_t detail::ComponentTypeIdFromName(const char* uniqueTypeName) {
+    static std::mutex mutex;
+    static std::unordered_map<std::string, uint32_t> ids;
+    std::lock_guard lock(mutex);
+    auto [it, inserted] = ids.try_emplace(uniqueTypeName, static_cast<uint32_t>(ids.size()));
+    return it->second;
+}
 
 glm::mat4 TransformComponent::Matrix() const {
     glm::mat4 m = glm::translate(glm::mat4(1.0f), position);

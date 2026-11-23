@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - thread-safe logging with an in-memory ring buffer (for the editor console).
 
 #include <cstdint>
@@ -21,13 +22,13 @@ struct LogEntry {
 
 namespace Log {
 
-void Write(LogLevel level, std::string_view message);
+MAGE_API void Write(LogLevel level, std::string_view message);
 
 // Snapshot of the most recent lines (oldest first). Thread-safe.
-std::vector<LogEntry> Snapshot(size_t maxEntries = 512);
+MAGE_API std::vector<LogEntry> Snapshot(size_t maxEntries = 512);
 // Monotonic counter that increases whenever a line is written.
-uint64_t Revision();
-void Clear();
+MAGE_API uint64_t Revision();
+MAGE_API void Clear();
 
 template <class... Args>
 void Trace(std::format_string<Args...> fmt, Args&&... args) { Write(LogLevel::Trace, std::format(fmt, std::forward<Args>(args)...)); }

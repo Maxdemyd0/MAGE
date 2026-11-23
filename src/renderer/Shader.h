@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - GLSL program wrapper with a uniform-location cache.
 
 #include <string>
@@ -10,7 +11,7 @@
 
 namespace mage {
 
-class Shader {
+class MAGE_API Shader {
 public:
     Shader() = default;
     ~Shader();

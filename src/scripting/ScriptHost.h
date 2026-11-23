@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - embedded .NET CoreCLR scripting host.
 //
 // Boot sequence (see ScriptHost.cpp):
@@ -23,7 +24,7 @@ namespace mage {
 
 class Engine;
 
-class ScriptHost {
+class MAGE_API ScriptHost {
 public:
     ScriptHost() = default;
     ~ScriptHost();

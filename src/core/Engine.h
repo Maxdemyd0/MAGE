@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - engine core: subsystem lifecycle + fixed-timestep simulation loop.
 //
 // Frame structure (Engine::Run):
@@ -79,7 +80,7 @@ struct FrameStats {
     double simulationTime = 0.0;
 };
 
-class Engine {
+class MAGE_API Engine {
 public:
     Engine();
     ~Engine();

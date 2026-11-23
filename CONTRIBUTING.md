@@ -40,4 +40,7 @@ Signed-off-by: Your Name <you@example.com>
 
 * C++20. Follow the existing style: 4-space indent, `PascalCase` types and functions, `m_` member prefix.
 * Keep Jolt, GL and .NET types out of public headers where practical.
+* Mark public engine classes and free functions with `MAGE_API` (from `core/Export.h`). Without it they are not
+  exported from `MAGE_Engine.dll`. Don't put mutable `static` data in header-only code, because each DLL/EXE would
+  get its own copy.
 * Do not let exceptions cross the managed/native boundary.

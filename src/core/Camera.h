@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - camera, view frustum and camera controllers.
 
 #include <glm/glm.hpp>
@@ -11,14 +12,14 @@ namespace mage {
 class Input;
 
 // Six planes (ax + by + cz + d >= 0 means inside) extracted from a view-projection matrix.
-struct Frustum {
+struct MAGE_API Frustum {
     glm::vec4 planes[6]{};
 
     void Extract(const glm::mat4& viewProjection);
     bool IntersectsAABB(const glm::vec3& min, const glm::vec3& max) const;
 };
 
-class Camera {
+class MAGE_API Camera {
 public:
     glm::vec3 position{0.0f, 5.0f, -10.0f};
     glm::vec3 target{0.0f, 0.0f, 0.0f};
@@ -33,7 +34,7 @@ public:
 };
 
 // Third-person chase camera for vehicles: smooth follow, right-mouse orbit, scroll zoom.
-class ChaseCameraController {
+class MAGE_API ChaseCameraController {
 public:
     float distance = 8.0f;
     float height = 2.4f;
@@ -54,7 +55,7 @@ private:
 };
 
 // Free-fly camera (editor): hold RMB + WASD/QE, Shift to go fast.
-class FlyCameraController {
+class MAGE_API FlyCameraController {
 public:
     float speed = 20.0f;
     float sensitivity = 0.0025f;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
+#include "core/Export.h"
 // MAGE v1 - GPU meshes and procedural primitives.
 
 #include <cstdint>
@@ -21,7 +22,7 @@ struct Vertex {
     glm::vec2 uv;
 };
 
-struct AABB {
+struct MAGE_API AABB {
     glm::vec3 min{0.0f};
     glm::vec3 max{0.0f};
 
@@ -42,14 +43,14 @@ struct MeshData {
 };
 
 namespace Primitives {
-MeshData Cube();                         // unit cube, [-0.5, 0.5]^3
-MeshData Plane();                        // unit quad on XZ, facing +Y
-MeshData Sphere(int stacks = 24, int slices = 32);  // diameter 1
-MeshData Cylinder(int segments = 32);    // radius 0.5, height 1, axis +Y
-MeshData Cone(int segments = 32);        // base radius 0.5 at y=-0.5, apex at y=+0.5
+MAGE_API MeshData Cube();                         // unit cube, [-0.5, 0.5]^3
+MAGE_API MeshData Plane();                        // unit quad on XZ, facing +Y
+MAGE_API MeshData Sphere(int stacks = 24, int slices = 32);  // diameter 1
+MAGE_API MeshData Cylinder(int segments = 32);    // radius 0.5, height 1, axis +Y
+MAGE_API MeshData Cone(int segments = 32);        // base radius 0.5 at y=-0.5, apex at y=+0.5
 } // namespace Primitives
 
-class MeshLibrary {
+class MAGE_API MeshLibrary {
 public:
     ~MeshLibrary();
     void CreateDefaultPrimitives();
