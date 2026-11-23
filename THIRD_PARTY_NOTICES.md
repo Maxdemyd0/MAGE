@@ -1,6 +1,6 @@
 # Third-party notices
 
-MAGE's own code is licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
+MAGE's own code is licensed under **LGPL-3.0-or-later** (see [LICENSE](LICENSE) and [COPYING](COPYING)).
 The build downloads the following dependencies at configure time. They are not vendored in this repository, and
 each one stays under its own license. All of these licenses are GPL-compatible.
 

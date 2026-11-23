@@ -1,6 +1,6 @@
 # MAGE v1 - Maxdemyd0's Advanced Game Engine
 
-[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+[![License: LGPL v3+](https://img.shields.io/badge/License-LGPLv3%2B-blue.svg)](LICENSE)
 
 An open-source 3D game engine written from scratch in **C++20**, with gameplay scripting in **C# (.NET 8+, CoreCLR)**.
 It does not fork any existing engine. Third-party libraries are used only as building blocks: GLFW, GLM, Jolt Physics, Dear ImGui, nlohmann/json, and .NET hosting.
@@ -109,13 +109,21 @@ The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
 
 ## License
 
-MAGE is free and open-source software, licensed under the **GNU General Public License v3.0 or later**
-([LICENSE](LICENSE), SPDX `GPL-3.0-or-later`).
+MAGE is free and open-source software, licensed under the **GNU Lesser General Public License v3.0 or later**
+(SPDX `LGPL-3.0-or-later`). The LGPL is a set of additional permissions on top of the GPL: see [LICENSE](LICENSE)
+(LGPLv3) together with [COPYING](COPYING) (GPLv3).
 
-* You may use, study, modify and redistribute MAGE.
-* If you distribute MAGE, a modified version of it, or a program built on it (including games that link the engine),
-  you must release the complete corresponding source under the GPL as well. The engine and its derivatives cannot be
-  made closed source.
+* **The engine stays open.** If you distribute MAGE or a modified version of it, including the C++ engine and the
+  `Mage.Core` C# SDK, you must publish the source of those changes under the LGPL. Nobody can turn MAGE into a
+  closed-source fork.
+* **Your game can be closed source.** Games and tools that only *use* MAGE can ship under any license, including
+  proprietary or commercial ones, provided you:
+  * include the LGPL/GPL texts and a notice that MAGE is used,
+  * keep MAGE replaceable, so a user can rebuild your game against a modified MAGE. The simplest way is to use it as
+    a shared library (`MAGE_Engine` is built as a static library by default; if you link it statically, ship your
+    game's object files or another way to relink),
+  * provide (or offer) the source of the MAGE version you shipped.
+  C# gameplay scripts that reference `Mage.Core.dll` are separate assemblies and can use any license.
 * Contributions are accepted under the same license with a DCO sign-off and no CLA (see [CONTRIBUTING.md](CONTRIBUTING.md)).
   Copyright stays with each contributor, so the project as a whole cannot be relicensed as closed source later.
 
