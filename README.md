@@ -1,5 +1,7 @@
 # MAGE v1 - Maxdemyd0's Advanced Game Engine
 
+[![License: GPL v3+](https://img.shields.io/badge/License-GPLv3%2B-blue.svg)](LICENSE)
+
 An open-source 3D game engine written from scratch in **C++20**, with gameplay scripting in **C# (.NET 8+, CoreCLR)**.
 It does not fork any existing engine. Third-party libraries are used only as building blocks: GLFW, GLM, Jolt Physics, Dear ImGui, nlohmann/json, and .NET hosting.
 
@@ -104,3 +106,17 @@ To add a gameplay script, derive from `Mage.Entity` in `scripting/GameScripts`, 
 
 Positions are relative to the sector centre. The default sector size is 96 m. `physics` is one of `static`, `dynamic` or `none`.
 The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
+
+## License
+
+MAGE is free and open-source software, licensed under the **GNU General Public License v3.0 or later**
+([LICENSE](LICENSE), SPDX `GPL-3.0-or-later`).
+
+* You may use, study, modify and redistribute MAGE.
+* If you distribute MAGE, a modified version of it, or a program built on it (including games that link the engine),
+  you must release the complete corresponding source under the GPL as well. The engine and its derivatives cannot be
+  made closed source.
+* Contributions are accepted under the same license with a DCO sign-off and no CLA (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+  Copyright stays with each contributor, so the project as a whole cannot be relicensed as closed source later.
+
+Third-party dependencies keep their own permissive licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

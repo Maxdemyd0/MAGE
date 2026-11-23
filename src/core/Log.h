@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
 // MAGE v1 - thread-safe logging with an in-memory ring buffer (for the editor console).
 

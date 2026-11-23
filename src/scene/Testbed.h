@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
 // MAGE v1 - vertical-slice testbed scene: checkerboard ground, ramps, props and a drivable
 // 4-wheel raycast vehicle controlled from C# (GameScripts.TestVehicleScript).

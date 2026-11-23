@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 // =============================================================================
 //  MAGE v1 Editor - docked ImGui viewport + live entity / physics inspector
 //

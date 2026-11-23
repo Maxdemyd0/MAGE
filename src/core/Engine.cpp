@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "core/Window.h"

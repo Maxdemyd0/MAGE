@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
 // MAGE v1 - minimal, self-contained OpenGL 4.x core function loader.
 // Only the entry points the renderer actually uses are loaded (via glfwGetProcAddress).

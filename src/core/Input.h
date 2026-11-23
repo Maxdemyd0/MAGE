@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #pragma once
 // MAGE v1 - keyboard / mouse input. Key codes are GLFW key codes (also used by C# KeyCode).
 

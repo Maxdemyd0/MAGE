@@ -11,6 +11,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <RollForward>LatestMajor</RollForward>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <Copyright>Copyright (C) 2026 Maxdemyd0 and MAGE contributors</Copyright>
   </PropertyGroup>
 
   <ItemGroup>

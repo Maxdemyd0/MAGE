@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "renderer/PhysicsDebugRenderer.h"
 
 #ifdef JPH_DEBUG_RENDERER
