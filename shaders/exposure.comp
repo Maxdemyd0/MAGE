@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Auto exposure: average log luminance from the histogram (ignoring the darkest 40% and the
+// brightest 5% of pixels, similar to matrix metering), converted to EV100 and adapted over
+// time like the human eye. Manual mode uses a fixed EV100. Single workgroup.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 256) in;
+
+shared float sharedCount[256];
+
+const float MIN_LOG = -14.0;
+const float MAX_LOG = 10.0;
+
+void main() {
+    uint i = gl_LocalInvocationIndex;
+    float count = float(exposureData.histogram[i]);
+    sharedCount[i] = i == 0u ? 0.0 : count;
+    barrier();
+    exposureData.histogram[i] = 0u; // reset for the next frame
+    barrier();
+
+    if (i == 0u) {
+        float total = 0.0;
+        for (int b = 1; b < 256; ++b) total += sharedCount[b];
+        float lowCut = total * 0.40, highCut = total * 0.95;
+        float acc = 0.0, sumLog = 0.0, sumWeight = 0.0;
+        for (int b = 1; b < 256; ++b) {
+            float c = sharedCount[b];
+            float binLo = acc, binHi = acc + c;
+            float use = max(min(binHi, highCut) - max(binLo, lowCut), 0.0);
+            acc = binHi;
+            float logLum = MIN_LOG + (float(b) - 0.5) / 254.0 * (MAX_LOG - MIN_LOG);
+            sumLog += use * logLum;
+            sumWeight += use;
+        }
+        float avgLog = sumWeight > 0.0 ? sumLog / sumWeight : -4.0;
+        float lumScale = ubo.params1.x;                        // radiance units -> cd/m2
+        float avgLum = exp2(avgLog) * lumScale;
+        // EV100 from average luminance (reflected-light meter, K = 12.5).
+        float meteredEV = log2(max(avgLum, 1e-4) * 100.0 / 12.5);
+        bool autoExposure = (ubo.counts.z & CAMERA_AUTO_EXPOSURE) != 0u;
+        float targetEV = autoExposure ? meteredEV - ubo.camera.x : ubo.camera.y;
+
+        float currentEV = exposureData.ev100;
+        bool first = exposureData.exposure <= 0.0;
+        float dt = clamp(ubo.cameraPos.w, 0.0, 0.25);
+        float speed = targetEV > currentEV ? 1.6 : 3.0;
+        float ev = (first || !autoExposure) ? targetEV : mix(currentEV, targetEV, 1.0 - exp(-dt * speed));
+        exposureData.ev100 = ev;
+        exposureData.averageLum = avgLum;
+        // Calibrate so the metered luminance (L = 2^EV100 * 12.5 / 100) maps to 18% middle grey
+        // (standard output sensitivity, like a camera's light meter), in radiance units.
+        exposureData.exposure = lumScale * 0.18 / (exp2(ev) * 0.125);
+    }
+}

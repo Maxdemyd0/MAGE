@@ -259,6 +259,10 @@ private:
             ImGui::SliderFloat("Metallic", &m->metallic, 0.0f, 1.0f);
             ImGui::SliderFloat("Roughness", &m->roughness, 0.02f, 1.0f);
             ImGui::ColorEdit3("Emissive", &m->emissive.x, ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
+            ImGui::SliderFloat("Clearcoat", &m->clearcoat, 0.0f, 1.0f);
+            ImGui::SliderFloat("Clearcoat roughness", &m->clearcoatRoughness, 0.02f, 1.0f);
+            ImGui::SliderFloat("Transmission (glass)", &m->transmission, 0.0f, 1.0f);
+            ImGui::SliderFloat("IOR", &m->ior, 1.0f, 2.5f);
             ImGui::DragFloat("Checker (m)", &m->checkerScale, 0.1f, 0.0f, 100.0f);
             ImGui::Checkbox("Visible", &m->visible);
             ImGui::SameLine();

@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Luminance histogram for auto exposure (log2 luminance, 256 bins, shared-memory atomics).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+shared uint localBins[256];
+
+const float MIN_LOG = -14.0;
+const float MAX_LOG = 10.0;
+
+void main() {
+    localBins[gl_LocalInvocationIndex] = 0u;
+    barrier();
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = ImageSize();
+    if (px.x < size.x && px.y < size.y && (px.x & 1) == 0 && (px.y & 1) == 0) {
+        float lum = Luminance(imageLoad(hdrColor, px).rgb);
+        uint bin = 0u;
+        if (lum > 1e-7) {
+            float t = clamp((log2(lum) - MIN_LOG) / (MAX_LOG - MIN_LOG), 0.0, 1.0);
+            bin = uint(t * 254.0 + 1.0);
+        }
+        // Centre-weighted metering.
+        vec2 uv = (vec2(px) + 0.5) / vec2(size) - 0.5;
+        uint weight = uint(1.0 + 3.0 * exp(-dot(uv, uv) * 6.0));
+        atomicAdd(localBins[bin], weight);
+    }
+    barrier();
+    atomicAdd(exposureData.histogram[gl_LocalInvocationIndex], localBins[gl_LocalInvocationIndex]);
+}

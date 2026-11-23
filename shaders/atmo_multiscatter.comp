@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Multiple-scattering LUT (Hillaire 2020, section 5.5): for each (sun zenith, height) integrates
+// second-order scattering over the sphere of directions and sums the infinite series
+// Psi_ms = L_2nd / (1 - f_ms). One workgroup of 64 threads (directions) per texel.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "atmosphere.glsl"
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 64) in;
+
+shared vec3 sharedL[64];
+shared vec3 sharedF[64];
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    uint dirIndex = gl_LocalInvocationID.z;
+    vec2 uv = (vec2(px) + 0.5) / vec2(MULTISCATTER_LUT_SIZE);
+    uv = vec2(FromSubUvToUnit(uv.x, float(MULTISCATTER_LUT_SIZE.x)), FromSubUvToUnit(uv.y, float(MULTISCATTER_LUT_SIZE.y)));
+    float sunZenithCos = uv.x * 2.0 - 1.0;
+    vec3 sunDir = vec3(0.0, sunZenithCos, sqrt(max(0.0, 1.0 - sunZenithCos * sunZenithCos)));
+    float viewHeight = BottomRadius() + clamp(uv.y + 1e-4, 0.0, 1.0) * (TopRadius() - BottomRadius() - 1e-3);
+    vec3 ro = vec3(0.0, viewHeight, 0.0);
+
+    // 8x8 stratified directions over the sphere.
+    float i = 0.5 + float(dirIndex / 8u);
+    float j = 0.5 + float(dirIndex % 8u);
+    float randA = i / 8.0, randB = j / 8.0;
+    float theta = 2.0 * PI * randA;
+    float phi = acos(1.0 - 2.0 * randB);
+    vec3 rd = vec3(cos(theta) * sin(phi), cos(phi), sin(theta) * sin(phi));
+
+    ScatteringResult r = IntegrateScattering(ro, rd, sunDir, vec3(1.0), 20, -1.0, true, false, true);
+    sharedL[dirIndex] = r.luminance / 64.0;
+    sharedF[dirIndex] = r.multiScatAs1 / 64.0;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (dirIndex < s) {
+            sharedL[dirIndex] += sharedL[dirIndex + s];
+            sharedF[dirIndex] += sharedF[dirIndex + s];
+        }
+        barrier();
+    }
+    if (dirIndex == 0u) {
+        vec3 L = sharedL[0];
+        vec3 fms = sharedF[0];
+        vec3 psi = L / max(vec3(1.0) - fms, vec3(1e-4));
+        imageStore(lutImage[1], px, vec4(psi, 1.0));
+    }
+}

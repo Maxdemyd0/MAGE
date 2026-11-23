@@ -86,7 +86,7 @@ bool Context::Init(std::string& error) {
         VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v12};
         vkGetPhysicalDeviceFeatures2(pd, &f2);
         if (!rq.rayQuery || !as.accelerationStructure || !v12.bufferDeviceAddress ||
-            !f2.features.shaderStorageImageArrayDynamicIndexing)
+            !f2.features.shaderStorageImageArrayDynamicIndexing || !f2.features.shaderSampledImageArrayDynamicIndexing)
             continue;
 
         uint32_t qfCount = 0;
@@ -127,6 +127,7 @@ bool Context::Init(std::string& error) {
     v12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v12};
     f2.features.shaderStorageImageArrayDynamicIndexing = VK_TRUE;
+    f2.features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
     f2.features.shaderInt64 = VK_FALSE;
 
     const float priority = 1.0f;
@@ -230,7 +231,8 @@ Image Context::CreateImage(uint32_t width, uint32_t height, VkFormat format) {
     ici.arrayLayers = 1;
     ici.samples = VK_SAMPLE_COUNT_1_BIT;
     ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ici.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VmaAllocationCreateInfo aci{};
     aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     vmaCreateImage(allocator, &ici, &aci, &img.image, &img.allocation, nullptr);

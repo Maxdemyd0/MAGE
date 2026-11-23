@@ -198,7 +198,8 @@ void SectorStreamer::GenerateProcedural(const SectorCoord& coord, SectorData& ou
                                         {"position", WriteVec3({lotCenter.x, 0.2f + h * 0.5f, lotCenter.y})},
                                         {"scale", WriteVec3({w, h, d})}, {"color", WriteVec3(color)},
                                         {"metallic", rng.Float() < 0.2f ? 0.6f : 0.0f},
-                                        {"roughness", rng.Range(0.35f, 0.9f)}, {"physics", "static"}});
+                                        {"roughness", rng.Range(0.35f, 0.9f)},
+                                        {"clearcoat", rng.Float() < 0.35f ? 1.0f : 0.0f}, {"physics", "static"}});
                     if (h > 20.0f && rng.Float() < 0.5f) {
                         // Rooftop block.
                         entities.push_back({{"name", "Rooftop"}, {"mesh", "cube"},
@@ -220,7 +221,7 @@ void SectorStreamer::GenerateProcedural(const SectorCoord& coord, SectorData& ou
                                 {"metallic", 0.8f}, {"roughness", 0.4f}, {"physics", "static"}});
             entities.push_back({{"name", "LampLight"}, {"mesh", "sphere"}, {"position", WriteVec3(p + glm::vec3(0, 3.2f, 0))},
                                 {"scale", WriteVec3({0.6f, 0.6f, 0.6f})}, {"color", WriteVec3({1.0f, 0.9f, 0.7f})},
-                                {"emissive", WriteVec3({1.2f, 1.0f, 0.7f})}, {"physics", "none"}});
+                                {"emissive", WriteVec3({5.2f, 5.1f, 4.9f})}, {"physics", "none"}});
         }
     }
 
@@ -363,6 +364,9 @@ bool SectorStreamer::ParseSectorJson(const std::string& text, SectorData& out, s
                 d.emissive = ReadVec3(e, "emissive", glm::vec3(0.0f));
                 d.metallic = e.value("metallic", 0.0f);
                 d.roughness = e.value("roughness", 0.7f);
+                d.clearcoat = e.value("clearcoat", 0.0f);
+                d.transmission = e.value("transmission", 0.0f);
+                d.ior = e.value("ior", 1.5f);
                 d.physics = ParsePhysics(e.value("physics", std::string("static")));
                 d.mass = e.value("mass", 0.0f);
                 out.entities.push_back(std::move(d));
@@ -383,7 +387,8 @@ std::string SectorStreamer::SectorToJson(const SectorData& data) {
         entities.push_back({{"name", d.name}, {"mesh", d.mesh}, {"position", WriteVec3(d.position)},
                             {"rotation", WriteVec3(d.rotationDeg)}, {"scale", WriteVec3(d.scale)},
                             {"color", WriteVec3(d.color)}, {"emissive", WriteVec3(d.emissive)},
-                            {"metallic", d.metallic}, {"roughness", d.roughness},
+                            {"metallic", d.metallic}, {"roughness", d.roughness}, {"clearcoat", d.clearcoat},
+                            {"transmission", d.transmission}, {"ior", d.ior},
                             {"physics", PhysicsName(d.physics)}, {"mass", d.mass}});
     }
     root["entities"] = std::move(entities);

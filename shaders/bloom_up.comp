@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Bloom upsample: 3x3 tent filter of level pc.pass.x + 1 added onto level pc.pass.x.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    int dst = pc.pass.x;
+    int src = dst + 1;
+    ivec2 dstSize = imageSize(bloomImage[dst]);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= dstSize.x || px.y >= dstSize.y) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(dstSize);
+    vec2 t = 1.0 / vec2(imageSize(bloomImage[src]));
+    vec3 s = texture(bloomTex[src], uv + vec2(-t.x, -t.y)).rgb + texture(bloomTex[src], uv + vec2(t.x, -t.y)).rgb +
+             texture(bloomTex[src], uv + vec2(-t.x, t.y)).rgb + texture(bloomTex[src], uv + vec2(t.x, t.y)).rgb;
+    s += 2.0 * (texture(bloomTex[src], uv + vec2(0.0, -t.y)).rgb + texture(bloomTex[src], uv + vec2(0.0, t.y)).rgb +
+                texture(bloomTex[src], uv + vec2(-t.x, 0.0)).rgb + texture(bloomTex[src], uv + vec2(t.x, 0.0)).rgb);
+    s += 4.0 * texture(bloomTex[src], uv).rgb;
+    vec3 current = imageLoad(bloomImage[dst], px).rgb;
+    imageStore(bloomImage[dst], px, vec4(current + s / 16.0, 1.0));
+}

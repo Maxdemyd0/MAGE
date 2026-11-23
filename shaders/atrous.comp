@@ -28,8 +28,11 @@ void main() {
     }
     float lum = Luminance(center.rgb);
     float sigmaL = ubo.params1.z * sqrt(max(center.a, 0.0)) + 1e-4;
-    // Depth tolerance grows with distance and filter step (screen-space footprint).
-    float sigmaZ = max(guide.w * 0.01 * float(step), 1e-3);
+    // Screen-space depth gradient (SVGF): on a plane seen at a grazing angle neighbouring
+    // pixels differ a lot in depth, so the depth tolerance follows the local gradient.
+    ivec2 px1 = min(px + ivec2(1, 0), size - 1), py1 = min(px + ivec2(0, 1), size - 1);
+    vec4 gx = imageLoad(gGuide, px1), gy = imageLoad(gGuide, py1);
+    vec2 dz = vec2(gx.w >= 0.0 ? gx.w - guide.w : 0.0, gy.w >= 0.0 ? gy.w - guide.w : 0.0);
 
     const float kernel[2] = float[2](0.5, 0.25);
     vec3 sumColor = center.rgb * 0.25;
@@ -45,7 +48,8 @@ void main() {
             vec4 sq = imageLoad(filterTemp[src], q);
 
             float wN = pow(max(dot(guide.xyz, gq.xyz), 0.0), 64.0);
-            float wZ = exp(-abs(guide.w - gq.w) / sigmaZ);
+            float expected = abs(dot(dz, vec2(dx, dy))) * float(step);
+            float wZ = exp(-abs(guide.w - gq.w) / (expected + guide.w * 0.002 + 1e-3));
             float wL = exp(-abs(lum - Luminance(sq.rgb)) / sigmaL);
             float w = kernel[abs(dx)] * kernel[abs(dy)] * wN * wZ * wL;
 

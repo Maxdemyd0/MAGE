@@ -49,6 +49,7 @@ struct EngineConfig {
     bool enableScripting = true;
     bool enableStreaming = true;
     bool enablePathTracing = true;  // Vulkan RT path tracer when the GPU supports it
+    bool background = false;        // don't take window focus / keyboard (automated runs)
     std::filesystem::path assetDirectory;   // empty = auto (<exe>/assets, then source tree)
     std::filesystem::path scriptDirectory;  // empty = <exe>/Scripts
 };
@@ -66,6 +67,10 @@ struct SpawnDesc {
     float metallic = 0.0f;
     float roughness = 0.6f;
     float checkerScale = 0.0f;
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.05f;
+    float transmission = 0.0f;
+    float ior = 1.5f;
     bool castShadows = true;
     SpawnPhysics physics = SpawnPhysics::None;
     float mass = 0.0f;              // 0 = from volume

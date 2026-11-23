@@ -52,7 +52,11 @@ struct MeshComponent {
     float metallic = 0.0f;
     float roughness = 0.6f;
     float checkerScale = 0.0f;       // > 0 : world-space procedural checkerboard (meters per tile)
-    glm::vec3 emissive{0.0f};
+    glm::vec3 emissive{0.0f};           // radiance (path tracer units, ~25 000 cd/m^2 each)
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.05f;
+    float transmission = 0.0f;         // thin-walled glass (albedo = tint)
+    float ior = 1.5f;
     bool visible = true;
     bool castShadows = true;
 };

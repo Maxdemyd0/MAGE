@@ -301,7 +301,7 @@ void Testbed::DrawTuningWindow(Engine& engine, bool* open) {
 void Testbed::DrawPathTracerWindow(Engine& engine, bool* open) {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 480.0f, vp->WorkPos.y + 470.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(460.0f, 520.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Path Tracer", open)) {
         ImGui::End();
         return;
@@ -318,43 +318,78 @@ void Testbed::DrawPathTracerWindow(Engine& engine, bool* open) {
     ImGui::Checkbox("Path tracing (F3)", &renderer.pathTracing);
     ImGui::SameLine();
     ImGui::TextDisabled("%s", st.device.c_str());
-    ImGui::Text("%ux%u  %u instances  %.0f traced FPS", st.width, st.height, st.instances, st.tracedFps);
-    ImGui::Text("GPU %.2f ms  latency %.1f ms  upload %.2f ms", st.gpuMs, st.latencyMs, st.uploadMs);
-    const PathTracerSettings& cur = pt->settings;
-    const uint32_t converged = std::min<uint32_t>(st.staticFrames + 1, static_cast<uint32_t>(cur.maxHistory));
-    ImGui::Text("Accumulated: %u frames x %d spp%s", converged, cur.samplesPerPixel,
-                st.staticFrames > 0 ? "  (static - converging)" : "  (moving - temporal denoise)");
-    ImGui::TextDisabled("Restarts: camera %llu, scene %llu", static_cast<unsigned long long>(st.cameraChanges),
-                        static_cast<unsigned long long>(st.sceneChanges));
+    ImGui::Text("%ux%u  %.0f traced FPS  GPU %.2f ms  latency %.1f ms", st.width, st.height, st.tracedFps, st.gpuMs, st.latencyMs);
+    const uint32_t converged = std::min<uint32_t>(st.staticFrames + 1, static_cast<uint32_t>(pt->settings.maxHistory));
+    ImGui::Text("Accumulated %u frames%s  |  %u instances, %u lights", converged,
+                st.staticFrames > 0 ? " (static)" : " (moving)", st.instances, st.lights);
+    ImGui::Text("Camera EV100 %.1f   scene %.0f cd/m^2", st.ev100, st.sceneLuminance);
 
     PathTracerSettings s = pt->settings;
-    bool reset = false;
-    ImGui::SeparatorText("Light transport");
-    reset |= ImGui::SliderInt("Max bounces", &s.maxBounces, 0, 12);
-    reset |= ImGui::SliderInt("Samples / pixel / frame", &s.samplesPerPixel, 1, 16);
-    ImGui::SliderFloat("Render scale", &s.renderScale, 0.25f, 1.0f, "%.2f");
-    reset |= ImGui::SliderFloat("Sun diameter (deg)", &s.sunAngularDiameterDeg, 0.05f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-    reset |= ImGui::SliderFloat("Sky intensity", &s.skyIntensity, 0.0f, 4.0f);
-    ImGui::SliderFloat("PT exposure", &s.exposure, 0.1f, 4.0f);
-    reset |= ImGui::SliderFloat("Firefly clamp", &s.fireflyClamp, 1.0f, 100.0f, "%.1f", ImGuiSliderFlags_Logarithmic);
-    ImGui::SeparatorText("Denoiser (SVGF-style)");
-    ImGui::Checkbox("Temporal accumulation", &s.accumulate);
-    ImGui::SameLine();
-    ImGui::Checkbox("Spatial denoise", &s.denoise);
-    ImGui::SliderInt("A-trous iterations", &s.atrousIterations, 0, 8);
-    ImGui::SliderFloat("Color sigma", &s.colorSigma, 0.5f, 16.0f);
-    ImGui::SliderFloat("Moving history alpha", &s.movingMinAlpha, 0.02f, 1.0f);
-    ImGui::SliderInt("Max accumulation", &s.maxHistory, 16, 16384);
-    ImGui::SliderFloat("Static tolerance (m)", &s.staticTolerance, 0.0f, 0.05f, "%.4f");
-    pt->settings = s;
-    if (reset) pt->ResetAccumulation();
-    if (ImGui::Button("Restart accumulation")) pt->ResetAccumulation();
-    ImGui::SeparatorText("Sun & sky (shared with raster)");
     LightingSettings& l = renderer.lighting;
-    bool lightChanged = ImGui::DragFloat3("Sun direction", &l.sunDirection.x, 0.01f, -1.0f, 1.0f);
-    lightChanged |= ImGui::SliderFloat("Sun intensity", &l.sunIntensity, 0.0f, 12.0f);
-    ImGui::SliderFloat("Exposure", &l.exposure, 0.1f, 4.0f);
-    if (lightChanged && glm::length(l.sunDirection) > 1e-3f) l.sunDirection = glm::normalize(l.sunDirection);
+
+    // ---- Time of day: sun elevation / azimuth drive the whole atmosphere ----------------------
+    if (ImGui::CollapsingHeader("Sun & time of day", ImGuiTreeNodeFlags_DefaultOpen)) {
+        glm::vec3 d = glm::normalize(l.sunDirection);
+        float elevation = glm::degrees(std::asin(std::clamp(d.y, -1.0f, 1.0f)));
+        float azimuth = glm::degrees(std::atan2(d.x, d.z));
+        bool sunChanged = ImGui::SliderFloat("Sun elevation", &elevation, -18.0f, 90.0f, "%.1f deg");
+        sunChanged |= ImGui::SliderFloat("Sun azimuth", &azimuth, -180.0f, 180.0f, "%.0f deg");
+        if (sunChanged) {
+            const float e = glm::radians(elevation), a = glm::radians(azimuth);
+            l.sunDirection = glm::vec3(std::cos(e) * std::sin(a), std::sin(e), std::cos(e) * std::cos(a));
+        }
+        const struct { const char* name; float elevation; } presets[] = {
+            {"Noon", 62.0f}, {"Afternoon", 28.0f}, {"Golden hour", 6.0f}, {"Sunset", 0.6f}, {"Dusk", -4.0f}, {"Night", -16.0f}};
+        for (int i = 0; i < 6; ++i) {
+            if (i > 0) ImGui::SameLine();
+            if (ImGui::SmallButton(presets[i].name)) {
+                const float e = glm::radians(presets[i].elevation), a = glm::radians(azimuth);
+                l.sunDirection = glm::vec3(std::cos(e) * std::sin(a), std::sin(e), std::cos(e) * std::cos(a));
+            }
+        }
+        ImGui::SliderFloat("Sun intensity", &s.sunIntensity, 0.0f, 4.0f);
+        ImGui::SliderFloat("Sun diameter", &s.sunAngularDiameterDeg, 0.05f, 10.0f, "%.2f deg", ImGuiSliderFlags_Logarithmic);
+    }
+    if (ImGui::CollapsingHeader("Atmosphere")) {
+        ImGui::SliderFloat("Air density (Rayleigh)", &s.rayleighScale, 0.0f, 4.0f);
+        ImGui::SliderFloat("Haze (aerosols)", &s.hazeDensity, 0.0f, 120.0f, "%.1f");
+        ImGui::SliderFloat("Haze anisotropy", &s.mieAnisotropy, 0.0f, 0.95f);
+        ImGui::SliderFloat("Ozone", &s.ozoneScale, 0.0f, 3.0f);
+        ImGui::SliderFloat("Ground albedo", &s.groundAlbedo, 0.0f, 1.0f);
+        ImGui::SliderFloat("Altitude (km)", &s.groundAltitudeKm, 0.0f, 8.0f);
+        ImGui::SliderFloat("Night sky (cd/m^2)", &s.nightSkyLuminance, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::Checkbox("Aerial perspective", &s.aerialPerspective);
+    }
+    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Auto exposure", &s.autoExposure);
+        if (s.autoExposure) ImGui::SliderFloat("Exposure compensation", &s.exposureCompensation, -4.0f, 4.0f, "%+.1f EV");
+        else ImGui::SliderFloat("EV100", &s.manualEV100, -6.0f, 18.0f, "%.1f");
+        ImGui::SliderFloat("Bloom", &s.bloomIntensity, 0.0f, 0.3f, "%.3f");
+        ImGui::Checkbox("Depth of field", &s.depthOfField);
+        if (s.depthOfField) {
+            ImGui::SliderFloat("f-stop", &s.fStop, 0.95f, 22.0f, "f/%.1f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Focus (m, 0 = auto)", &s.focusDistance, 0.0f, 200.0f, "%.1f");
+        }
+    }
+    if (ImGui::CollapsingHeader("Light transport")) {
+        ImGui::SliderInt("Max bounces", &s.maxBounces, 0, 16);
+        ImGui::SliderInt("Samples / pixel / frame", &s.samplesPerPixel, 1, 16);
+        ImGui::SliderFloat("Render scale", &s.renderScale, 0.25f, 1.0f, "%.2f");
+        ImGui::Checkbox("Emissive light sampling (NEE + MIS)", &s.lightSampling);
+        ImGui::SliderFloat("Firefly clamp", &s.fireflyClamp, 1.0f, 1000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+    }
+    if (ImGui::CollapsingHeader("Denoiser (SVGF-style)")) {
+        ImGui::Checkbox("Temporal accumulation", &s.accumulate);
+        ImGui::SameLine();
+        ImGui::Checkbox("Spatial denoise", &s.denoise);
+        ImGui::SliderInt("A-trous iterations", &s.atrousIterations, 0, 8);
+        ImGui::SliderFloat("Color sigma", &s.colorSigma, 0.5f, 16.0f);
+        ImGui::SliderFloat("Moving history alpha", &s.movingMinAlpha, 0.02f, 1.0f);
+        ImGui::SliderInt("Max accumulation", &s.maxHistory, 16, 16384);
+        ImGui::SliderFloat("Static tolerance (m)", &s.staticTolerance, 0.0f, 0.05f, "%.4f");
+        if (ImGui::Button("Restart accumulation")) pt->ResetAccumulation();
+    }
+    pt->settings = s;
     ImGui::End();
 }
 

@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Sky-view LUT: radiance of the whole sky dome as seen from the camera (rebuilt every frame,
+// so time of day changes are instant). Excludes the sun disc.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= SKYVIEW_LUT_SIZE.x || px.y >= SKYVIEW_LUT_SIZE.y) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(SKYVIEW_LUT_SIZE);
+    vec3 camPos = CameraAtmospherePos();
+    float viewHeight = length(camPos);
+    float viewZenithCos, lightViewCos;
+    UvToSkyViewParams(uv, viewHeight, viewZenithCos, lightViewCos);
+
+    // Build the direction in a frame where the sun lies in the +X/Y plane (azimuth reference).
+    vec3 sunDir = ubo.sunDir.xyz;
+    vec2 sunXZ = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-5, 0.0));
+    float sunZenithCos = sunDir.y;
+    float viewZenithSin = sqrt(max(0.0, 1.0 - viewZenithCos * viewZenithCos));
+    float lightViewSin = sqrt(max(0.0, 1.0 - lightViewCos * lightViewCos));
+    // Horizontal direction rotated from the sun azimuth by acos(lightViewCos).
+    vec2 sideXZ = vec2(-sunXZ.y, sunXZ.x);
+    vec2 dirXZ = sunXZ * lightViewCos + sideXZ * lightViewSin;
+    vec3 rd = vec3(dirXZ.x * viewZenithSin, viewZenithCos, dirXZ.y * viewZenithSin);
+
+    ScatteringResult r = IntegrateScattering(camPos, rd, sunDir, ubo.solarIrradiance.rgb, 30, -1.0, true, true, false);
+    imageStore(lutImage[2], px, vec4(r.luminance, 1.0));
+}

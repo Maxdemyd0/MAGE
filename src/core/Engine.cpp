@@ -90,7 +90,7 @@ bool Engine::Init(const EngineConfig& config) {
 
     // Window + GL.
     m_window = std::make_unique<Window>();
-    if (!m_window->Create(config.title, config.width, config.height, config.vsync)) return false;
+    if (!m_window->Create(config.title, config.width, config.height, config.vsync, !config.background)) return false;
     if (!gl::LoadFunctions([](const char* name) { return reinterpret_cast<void*>(glfwGetProcAddress(name)); })) {
         Log::Error("Failed to load OpenGL functions");
         return false;
@@ -243,6 +243,7 @@ void Engine::Run() {
         m_input.EndFrame();
         // Runtime: keys reach the game unless the player is typing into an ImGui text field.
         if (!m_config.editorMode && m_imguiInitialized) m_input.SetGameInputEnabled(!ImGui::GetIO().WantTextInput);
+        if (m_config.background) m_input.SetGameInputEnabled(false);
 
         // ---- Fixed-timestep simulation -----------------------------------------------
         int steps = 0;
@@ -345,7 +346,8 @@ void Engine::SubmitScene() {
         DrawCommand cmd;
         cmd.mesh = m.mesh;
         cmd.model = t.Matrix();
-        cmd.material = Material{m.albedo, m.metallic, m.roughness, m.checkerScale, m.emissive};
+        cmd.material = Material{m.albedo, m.metallic, m.roughness, m.checkerScale, m.emissive,
+                                m.clearcoat, m.clearcoatRoughness, m.transmission, m.ior};
         cmd.castShadows = m.castShadows;
         r.Submit(cmd);
     });
@@ -362,12 +364,12 @@ void Engine::SubmitScene() {
             DrawCommand tire;
             tire.mesh = cylinder;
             tire.model = glm::scale(wheel, glm::vec3(radius * 2.0f, width, radius * 2.0f));
-            tire.material = Material{glm::vec3(0.05f), 0.0f, 0.85f, 0.0f, glm::vec3(0.0f)};
+            tire.material = Material{glm::vec3(0.035f), 0.0f, 0.9f, 0.0f, glm::vec3(0.0f)};
             r.Submit(tire);
             DrawCommand hub;
             hub.mesh = cylinder;
             hub.model = glm::scale(wheel, glm::vec3(radius * 1.1f, width * 1.04f, radius * 1.1f));
-            hub.material = Material{glm::vec3(0.75f), 1.0f, 0.25f, 0.0f, glm::vec3(0.0f)};
+            hub.material = Material{glm::vec3(0.91f, 0.92f, 0.92f), 1.0f, 0.18f, 0.0f, glm::vec3(0.0f)};
             r.Submit(hub);
         }
         const glm::vec3 he = v.bodyHalfExtents;
@@ -375,16 +377,25 @@ void Engine::SubmitScene() {
         cabin.mesh = cube;
         cabin.model = glm::scale(glm::translate(body, glm::vec3(0.0f, he.y + 0.27f, -0.25f)),
                                  glm::vec3(he.x * 1.7f, 0.55f, he.z * 1.0f));
-        cabin.material = Material{glm::vec3(0.05f, 0.07f, 0.09f), 0.9f, 0.12f, 0.0f, glm::vec3(0.0f)};
+        // Tinted thin-walled glass (path traced: see-through with reflections; raster: dark).
+        cabin.material = Material{glm::vec3(0.42f, 0.5f, 0.52f), 0.0f, 0.03f, 0.0f, glm::vec3(0.0f), 0.0f, 0.05f, 0.9f, 1.52f};
         r.Submit(cabin);
+        // Interior (seats / dash) seen through the tinted glass.
+        DrawCommand interior;
+        interior.mesh = cube;
+        interior.model = glm::scale(glm::translate(body, glm::vec3(0.0f, he.y + 0.12f, -0.25f)),
+                                    glm::vec3(he.x * 1.6f, 0.36f, he.z * 0.92f));
+        interior.material = Material{glm::vec3(0.025f, 0.024f, 0.023f), 0.0f, 0.85f, 0.0f, glm::vec3(0.0f)};
+        r.Submit(interior);
         // Tail lights.
         for (float side : {-1.0f, 1.0f}) {
             DrawCommand light;
             light.mesh = cube;
             light.model = glm::scale(glm::translate(body, glm::vec3(side * he.x * 0.7f, he.y * 0.3f, -he.z - 0.01f)),
                                      glm::vec3(0.35f, 0.12f, 0.04f));
-            light.material = Material{glm::vec3(0.6f, 0.02f, 0.02f), 0.0f, 0.4f, 0.0f,
-                                      glm::vec3(v.brake > 0.0f || v.throttle < 0.0f ? 4.0f : 0.8f, 0.0f, 0.0f)};
+            const bool braking = v.brake > 0.0f || v.throttle < 0.0f;
+            light.material = Material{glm::vec3(0.6f, 0.02f, 0.02f), 0.0f, 0.3f, 0.0f,
+                                      glm::vec3(braking ? 1.2f : 0.25f, braking ? 0.02f : 0.004f, 0.0f), 1.0f, 0.02f};
             light.castShadows = false;
             r.Submit(light);
         }
@@ -522,6 +533,10 @@ Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
     m.metallic = d.metallic;
     m.roughness = d.roughness;
     m.checkerScale = d.checkerScale;
+    m.clearcoat = d.clearcoat;
+    m.clearcoatRoughness = d.clearcoatRoughness;
+    m.transmission = d.transmission;
+    m.ior = d.ior;
     m.castShadows = d.castShadows;
 
     if (d.physics != SpawnPhysics::None) {
@@ -563,8 +578,11 @@ Entity Engine::SpawnVehicle(const std::string& name, const VehicleDesc& desc, co
     auto& m = m_registry.Add<MeshComponent>(e);
     m.mesh = m_renderer->Meshes().Find("cube");
     m.albedo = color;
-    m.metallic = 0.55f;
-    m.roughness = 0.28f;
+    // Metallic-flake paint under a glossy clearcoat.
+    m.metallic = 0.6f;
+    m.roughness = 0.38f;
+    m.clearcoat = 1.0f;
+    m.clearcoatRoughness = 0.03f;
 
     BodyHandle body = InvalidBody;
     const VehicleHandle vh = m_physics->CreateRaycastVehicle(desc, e, body);
@@ -632,6 +650,9 @@ void Engine::OnSectorLoaded(const SectorData& data) {
         s.emissive = d.emissive;
         s.metallic = d.metallic;
         s.roughness = d.roughness;
+        s.clearcoat = d.clearcoat;
+        s.transmission = d.transmission;
+        s.ior = d.ior;
         s.mass = d.mass;
         s.physics = d.physics == SectorPhysics::Dynamic ? SpawnPhysics::Dynamic
                   : d.physics == SectorPhysics::Static  ? SpawnPhysics::Static

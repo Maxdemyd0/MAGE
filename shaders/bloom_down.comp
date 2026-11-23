@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Bloom downsample (13-tap, Jimenez 2014). Level 0 reads the HDR image with a Karis average
+// to suppress single-pixel fireflies. pc.pass.x = destination level.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+vec3 Fetch(vec2 uv, int level) {
+    return level < 0 ? texture(hdrTex, uv).rgb : texture(bloomTex[level], uv).rgb;
+}
+float KarisWeight(vec3 c) { return 1.0 / (1.0 + Luminance(c)); }
+
+void main() {
+    int dst = pc.pass.x;
+    ivec2 dstSize = imageSize(bloomImage[dst]);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= dstSize.x || px.y >= dstSize.y) return;
+    int src = dst - 1;
+    vec2 srcTexel = 1.0 / (src < 0 ? vec2(ImageSize()) : vec2(imageSize(bloomImage[src])));
+    vec2 uv = (vec2(px) + 0.5) / vec2(dstSize);
+
+    vec3 a = Fetch(uv + srcTexel * vec2(-2, -2), src), b = Fetch(uv + srcTexel * vec2(0, -2), src), c = Fetch(uv + srcTexel * vec2(2, -2), src);
+    vec3 d = Fetch(uv + srcTexel * vec2(-2, 0), src), e = Fetch(uv, src), f = Fetch(uv + srcTexel * vec2(2, 0), src);
+    vec3 g = Fetch(uv + srcTexel * vec2(-2, 2), src), h = Fetch(uv + srcTexel * vec2(0, 2), src), i = Fetch(uv + srcTexel * vec2(2, 2), src);
+    vec3 j = Fetch(uv + srcTexel * vec2(-1, -1), src), k = Fetch(uv + srcTexel * vec2(1, -1), src);
+    vec3 l = Fetch(uv + srcTexel * vec2(-1, 1), src), m = Fetch(uv + srcTexel * vec2(1, 1), src);
+
+    vec3 result;
+    if (src < 0) {
+        vec3 g0 = (a + b + d + e) * 0.25, g1 = (b + c + e + f) * 0.25, g2 = (d + e + g + h) * 0.25, g3 = (e + f + h + i) * 0.25, g4 = (j + k + l + m) * 0.25;
+        float w0 = KarisWeight(g0), w1 = KarisWeight(g1), w2 = KarisWeight(g2), w3 = KarisWeight(g3), w4 = KarisWeight(g4);
+        result = (g0 * w0 * 0.125 + g1 * w1 * 0.125 + g2 * w2 * 0.125 + g3 * w3 * 0.125 + g4 * w4 * 0.5) /
+                 (w0 * 0.125 + w1 * 0.125 + w2 * 0.125 + w3 * 0.125 + w4 * 0.5);
+    } else {
+        result = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
+    }
+    imageStore(bloomImage[dst], px, vec4(min(result, vec3(65000.0)), 1.0));
+}

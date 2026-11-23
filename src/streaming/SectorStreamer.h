@@ -51,6 +51,9 @@ struct SectorEntityDesc {
     glm::vec3 emissive{0.0f};
     float metallic = 0.0f;
     float roughness = 0.7f;
+    float clearcoat = 0.0f;
+    float transmission = 0.0f;
+    float ior = 1.5f;
     SectorPhysics physics = SectorPhysics::Static;
     float mass = 0.0f;
 };

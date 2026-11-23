@@ -2,13 +2,17 @@
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 //
 // MAGE hardware path tracer (VK_KHR_ray_query on RT cores).
-//   * GGX (VNDF-sampled) specular + Lambert diffuse, metallic/roughness workflow
-//   * next-event estimation of a finite-size sun (soft shadows), sky environment light
-//   * emissive surfaces, Russian roulette, firefly clamp
-//   * writes demodulated illumination + G-buffer for the SVGF-style denoiser
+//   Materials : Lambert + GGX (VNDF sampling, multi-scatter energy compensation), clearcoat layer,
+//               thin-walled dielectric transmission (glass) with tinted shadows
+//   Lights    : physically based sun (atmospheric transmittance, finite disc), sky from the atmosphere
+//               LUT, every emissive surface; next-event estimation for sun + emitters combined with
+//               BSDF sampling through multiple importance sampling (power heuristic)
+//   Camera    : thin-lens depth of field
+//   Output    : demodulated illumination + G-buffer for the SVGF-style denoiser
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
+#include "atmosphere.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -20,27 +24,48 @@ struct SurfaceHit {
     vec3 emission;
     float metallic;
     float roughness;
+    float clearcoat;
+    float clearcoatRoughness;
+    float transmission;
+    float ior;
     float t;
+    float lightPdfArea; // area-measure pdf of sampling this point through light NEE (0 = not a light)
 };
 
 vec3 VertexPosition(uint i) { return vec3(vertices[i * 8u + 0u], vertices[i * 8u + 1u], vertices[i * 8u + 2u]); }
 vec3 VertexNormal(uint i) { return vec3(vertices[i * 8u + 3u], vertices[i * 8u + 4u], vertices[i * 8u + 5u]); }
+vec3 ToWorld(Instance inst, vec3 p) {
+    vec4 h = vec4(p, 1.0);
+    return vec3(dot(inst.row0, h), dot(inst.row1, h), dot(inst.row2, h));
+}
+
+void TriangleWorld(Instance inst, uint prim, out vec3 p0, out vec3 p1, out vec3 p2) {
+    uvec4 mesh = meshes[inst.ids.x];
+    uint base = mesh.x + prim * 3u;
+    p0 = ToWorld(inst, VertexPosition(indices[base] + mesh.y));
+    p1 = ToWorld(inst, VertexPosition(indices[base + 1u] + mesh.y));
+    p2 = ToWorld(inst, VertexPosition(indices[base + 2u] + mesh.y));
+}
 
 bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, 0xFF, origin, 1e-3, dir, 1e5);
-    while (rayQueryProceedEXT(rq)) {}
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, 0xFF, origin, 1e-3, dir, 1e5);
+    while (rayQueryProceedEXT(rq)) {
+        // Non-opaque candidates are glass: for primary/bounce rays they are real surfaces.
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
+            rayQueryConfirmIntersectionEXT(rq);
+    }
     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
 
     int instanceId = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
-    int prim = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
     vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
     mat4x3 worldToObject = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
     hit.t = rayQueryGetIntersectionTEXT(rq, true);
 
     Instance inst = instances[instanceId];
     uvec4 mesh = meshes[inst.ids.x];
-    uint base = mesh.x + uint(prim) * 3u;
+    uint base = mesh.x + prim * 3u;
     uint i0 = indices[base] + mesh.y, i1 = indices[base + 1u] + mesh.y, i2 = indices[base + 2u] + mesh.y;
 
     vec3 w = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
@@ -60,8 +85,19 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     hit.albedo = inst.albedoMetallic.rgb;
     hit.metallic = inst.albedoMetallic.a;
     hit.emission = inst.emissionRoughness.rgb;
-    hit.roughness = clamp(inst.emissionRoughness.a, 0.04, 1.0);
-    float checker = inst.misc.x;
+    hit.roughness = clamp(inst.emissionRoughness.a, 0.02, 1.0);
+    hit.clearcoat = inst.layer.y;
+    hit.clearcoatRoughness = clamp(inst.layer.z, 0.02, 1.0);
+    hit.transmission = inst.layer.w;
+    hit.ior = max(inst.misc.x, 1.0);
+    hit.lightPdfArea = 0.0;
+    if (inst.misc.y > 0.0) {
+        vec3 a, b, c;
+        TriangleWorld(inst, prim, a, b, c);
+        float area = 0.5 * length(cross(b - a, c - a));
+        hit.lightPdfArea = inst.misc.y / (float(inst.ids.y) * max(area, 1e-8));
+    }
+    float checker = inst.layer.x;
     if (checker > 0.0) {
         vec2 cell = floor(hit.position.xz / checker);
         float k = mod(cell.x + cell.y, 2.0);
@@ -72,14 +108,23 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     return true;
 }
 
-bool Visible(vec3 origin, vec3 dir) {
+// Shadow ray with tinted transmission through glass. Returns 0 when blocked.
+vec3 Transmittance(vec3 origin, vec3 dir, float tMax) {
+    vec3 vis = vec3(1.0);
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, origin, 1e-3, dir, 1e5);
-    while (rayQueryProceedEXT(rq)) {}
-    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, 0xFF, origin, 1e-3, dir, tMax);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        Instance inst = instances[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)];
+        float tr = inst.layer.w;
+        vis *= mix(vec3(1.0), inst.albedoMetallic.rgb, tr) * tr * 0.92; // ~8% Fresnel loss per pane
+        if (max(vis.r, max(vis.g, vis.b)) < 1e-3) { rayQueryTerminateEXT(rq); return vec3(0.0); }
+    }
+    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) return vec3(0.0);
+    return vis;
 }
 
-// ---------------------------------------------------------------------------- BRDF
+// ---------------------------------------------------------------------------- BSDF
 void Basis(vec3 n, out vec3 t, out vec3 b) {
     float s = n.z >= 0.0 ? 1.0 : -1.0;
     float a = -1.0 / (s + n.z);
@@ -89,30 +134,79 @@ void Basis(vec3 n, out vec3 t, out vec3 b) {
 }
 
 vec3 FresnelSchlick(float cosTheta, vec3 f0) { return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
+float FresnelSchlick1(float cosTheta, float f0) { return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
 
 float D_GGX(float NdotH, float a2) {
     float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
     return a2 / (PI * d * d);
 }
+float G1_Smith(float NdotX, float a2) { return 2.0 * NdotX / (NdotX + sqrt(a2 + (1.0 - a2) * NdotX * NdotX)); }
 
-float G1_Smith(float NdotX, float a2) {
-    return 2.0 * NdotX / (NdotX + sqrt(a2 + (1.0 - a2) * NdotX * NdotX));
+// Directional albedo of single-scattering GGX (Karis' analytic fit). Used for energy compensation.
+float GgxAlbedo(float NdotV, float roughness) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return clamp(ab.x + ab.y, 0.05, 1.0);
 }
 
-vec3 EvalBRDF(SurfaceHit h, vec3 V, vec3 L) {
-    float NdotL = dot(h.normal, L), NdotV = dot(h.normal, V);
-    if (NdotL <= 0.0 || NdotV <= 0.0) return vec3(0.0);
+// Specular GGX lobe (with multiple-scattering energy compensation, Turquin 2019).
+vec3 SpecularLobe(vec3 N, vec3 V, vec3 L, float roughness, vec3 f0) {
+    float NdotL = dot(N, L), NdotV = dot(N, V);
     vec3 H = normalize(V + L);
-    float a = h.roughness * h.roughness;
+    float a = roughness * roughness;
     float a2 = max(a * a, 1e-7);
-    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
-    vec3 F = FresnelSchlick(dot(V, H), f0);
-    vec3 spec = F * D_GGX(max(dot(h.normal, H), 0.0), a2) * G1_Smith(NdotV, a2) * G1_Smith(NdotL, a2) / (4.0 * NdotV * NdotL);
-    vec3 diff = (1.0 - F) * (1.0 - h.metallic) * h.albedo / PI;
-    return diff + spec;
+    vec3 F = FresnelSchlick(max(dot(V, H), 0.0), f0);
+    vec3 spec = F * D_GGX(max(dot(N, H), 0.0), a2) * G1_Smith(NdotV, a2) * G1_Smith(NdotL, a2) / (4.0 * NdotV * NdotL);
+    float ess = GgxAlbedo(NdotV, roughness);
+    return spec * (1.0 + f0 * (1.0 / ess - 1.0));
 }
 
-// Heitz 2018, "Sampling the GGX Distribution of Visible Normals".
+float LobePdf(vec3 N, vec3 V, vec3 L, float roughness) { // VNDF reflection pdf (solid angle)
+    float NdotV = max(dot(N, V), 1e-4);
+    vec3 H = normalize(V + L);
+    float a = max(roughness * roughness, 0.001);
+    float a2 = a * a;
+    return G1_Smith(NdotV, a2) * D_GGX(max(dot(N, H), 0.0), a2) / (4.0 * NdotV);
+}
+
+struct LobeProbs { float coat; float spec; float glass; };
+
+LobeProbs Probabilities(SurfaceHit h, float NdotV) {
+    LobeProbs p;
+    p.glass = h.transmission;
+    p.coat = h.clearcoat > 0.0 ? clamp(h.clearcoat * FresnelSchlick1(NdotV, 0.04) * 2.0, 0.05, 0.5) : 0.0;
+    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
+    p.spec = mix(clamp(Luminance(FresnelSchlick(NdotV, f0)) * 1.5, 0.1, 0.9), 0.95, h.metallic);
+    return p;
+}
+
+// Non-delta part of the BSDF (the glass lobe is a delta and handled by sampling only).
+vec3 EvalBSDF(SurfaceHit h, vec3 V, vec3 L) {
+    float NdotL = dot(h.normal, L), NdotV = dot(h.normal, V);
+    if (NdotL <= 0.0 || NdotV <= 0.0 || dot(h.geoNormal, L) <= 0.0) return vec3(0.0);
+    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
+    vec3 H = normalize(V + L);
+    vec3 Fh = FresnelSchlick(max(dot(V, H), 0.0), f0);
+    vec3 base = (1.0 - Fh) * (1.0 - h.metallic) * h.albedo / PI + SpecularLobe(h.normal, V, L, h.roughness, f0);
+    if (h.clearcoat > 0.0) {
+        float fc = FresnelSchlick1(NdotV, 0.04) * h.clearcoat;
+        base = base * (1.0 - fc) + h.clearcoat * SpecularLobe(h.normal, V, L, h.clearcoatRoughness, vec3(0.04));
+    }
+    return base * (1.0 - h.transmission);
+}
+
+float PdfBSDF(SurfaceHit h, vec3 V, vec3 L) {
+    float NdotL = dot(h.normal, L), NdotV = dot(h.normal, V);
+    if (NdotL <= 0.0 || NdotV <= 0.0) return 0.0;
+    LobeProbs p = Probabilities(h, NdotV);
+    float pdfBase = p.spec * LobePdf(h.normal, V, L, h.roughness) + (1.0 - p.spec) * NdotL / PI;
+    float pdf = p.coat * LobePdf(h.normal, V, L, h.clearcoatRoughness) + (1.0 - p.coat) * pdfBase;
+    return (1.0 - p.glass) * pdf;
+}
+
 vec3 SampleGGXVNDF(vec3 Ve, float alpha, float u1, float u2) {
     vec3 Vh = normalize(vec3(alpha * Ve.x, alpha * Ve.y, Ve.z));
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
@@ -128,38 +222,54 @@ vec3 SampleGGXVNDF(vec3 Ve, float alpha, float u1, float u2) {
     return normalize(vec3(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
 }
 
-// Samples the next direction; returns BRDF * cos / pdf in 'weight'.
-bool SampleBRDF(SurfaceHit h, vec3 V, inout uint rng, out vec3 L, out vec3 weight) {
+// Samples the BSDF. 'pdf' < 0 marks a delta (perfectly specular) event.
+bool SampleBSDF(SurfaceHit h, vec3 V, inout uint rng, out vec3 L, out vec3 weight, out float pdf) {
     vec3 T, B;
     Basis(h.normal, T, B);
     vec3 Vl = vec3(dot(V, T), dot(V, B), dot(V, h.normal));
     if (Vl.z <= 0.0) return false;
+    LobeProbs p = Probabilities(h, Vl.z);
 
-    float a = h.roughness * h.roughness;
-    float a2 = max(a * a, 1e-7);
-    vec3 f0 = mix(vec3(0.04), h.albedo, h.metallic);
-    vec3 Fv = FresnelSchlick(Vl.z, f0);
-    float pSpec = mix(clamp(Luminance(Fv) * 1.5, 0.1, 0.9), 0.95, h.metallic);
+    // Thin-walled glass (delta): reflect or pass straight through, tinted.
+    if (Rand(rng) < p.glass) {
+        float f0 = pow((h.ior - 1.0) / (h.ior + 1.0), 2.0);
+        float F = FresnelSchlick1(Vl.z, f0);
+        float Ft = F + (1.0 - F) * F / (1.0 + F); // thin slab: both interfaces, multiple reflections
+        if (Rand(rng) < Ft) {
+            L = reflect(-V, h.normal);
+            weight = vec3(1.0);
+        } else {
+            L = -V;
+            weight = h.albedo;
+        }
+        pdf = -1.0;
+        return true;
+    }
 
-    if (Rand(rng) < pSpec) {
-        vec3 Hl = SampleGGXVNDF(Vl, max(a, 0.001), Rand(rng), Rand(rng));
-        vec3 Ll = reflect(-Vl, Hl);
-        if (Ll.z <= 0.0) return false;
-        vec3 F = FresnelSchlick(dot(Vl, Hl), f0);
-        weight = F * G1_Smith(Ll.z, a2) / pSpec; // VNDF: f*cos/pdf = F * G2/G1(V) = F * G1(L)
-        L = normalize(T * Ll.x + B * Ll.y + h.normal * Ll.z);
+    float u = Rand(rng);
+    vec3 Ll;
+    if (u < p.coat) {
+        Ll = reflect(-Vl, SampleGGXVNDF(Vl, max(h.clearcoatRoughness * h.clearcoatRoughness, 0.001), Rand(rng), Rand(rng)));
+    } else if (Rand(rng) < p.spec) {
+        Ll = reflect(-Vl, SampleGGXVNDF(Vl, max(h.roughness * h.roughness, 0.001), Rand(rng), Rand(rng)));
     } else {
         float r = sqrt(Rand(rng));
         float phi = 2.0 * PI * Rand(rng);
-        vec3 Ll = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
-        weight = (1.0 - Fv) * (1.0 - h.metallic) * h.albedo / (1.0 - pSpec); // cosine-weighted: pi cancels
-        L = normalize(T * Ll.x + B * Ll.y + h.normal * Ll.z);
+        Ll = vec3(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - r * r)));
     }
-    return dot(L, h.geoNormal) > 0.0;
+    if (Ll.z <= 0.0) return false;
+    L = normalize(T * Ll.x + B * Ll.y + h.normal * Ll.z);
+    if (dot(L, h.geoNormal) <= 0.0) return false;
+    pdf = PdfBSDF(h, V, L);
+    if (pdf <= 1e-8) return false;
+    weight = EvalBSDF(h, V, L) * dot(h.normal, L) / pdf;
+    return true;
 }
 
-// Uniformly samples the sun's cone (finite angular size -> soft shadows).
-vec3 SampleSun(inout uint rng) {
+float PowerHeuristic(float a, float b) { float a2 = a * a; return a2 / max(a2 + b * b, 1e-20); }
+
+// ---------------------------------------------------------------------------- lights
+vec3 SampleSunDirection(inout uint rng) {
     float cosMax = ubo.sunDir.w;
     float cosT = 1.0 - Rand(rng) * (1.0 - cosMax);
     float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
@@ -167,6 +277,51 @@ vec3 SampleSun(inout uint rng) {
     vec3 T, B;
     Basis(ubo.sunDir.xyz, T, B);
     return normalize(T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + ubo.sunDir.xyz * cosT);
+}
+
+float SunPdf() { return 1.0 / (2.0 * PI * (1.0 - ubo.sunDir.w)); }
+
+// Picks an emissive instance (by power) and a point on it. Returns its MIS-weighted contribution.
+vec3 SampleEmitters(SurfaceHit h, vec3 V, vec3 origin, inout uint rng) {
+    uint count = ubo.counts.x;
+    if (count == 0u || (ubo.counts.z & CAMERA_LIGHT_SAMPLING) == 0u) return vec3(0.0);
+    float u = Rand(rng);
+    uint lo = 0u, hi = count - 1u;
+    while (lo < hi) {
+        uint mid = (lo + hi) / 2u;
+        if (lights[mid].cdf < u) lo = mid + 1u; else hi = mid;
+    }
+    Light light = lights[lo];
+    Instance inst = instances[light.instance];
+    uint tri = min(uint(Rand(rng) * float(inst.ids.y)), inst.ids.y - 1u);
+    vec3 p0, p1, p2;
+    TriangleWorld(inst, tri, p0, p1, p2);
+    float su = sqrt(Rand(rng)), v = Rand(rng);
+    vec3 q = p0 * (1.0 - su) + p1 * (su * (1.0 - v)) + p2 * (su * v);
+    vec3 cr = cross(p1 - p0, p2 - p0);
+    float area = 0.5 * length(cr);
+    if (area < 1e-8) return vec3(0.0);
+    vec3 ln = cr / (2.0 * area);
+
+    vec3 d = q - origin;
+    float dist2 = dot(d, d);
+    float dist = sqrt(dist2);
+    vec3 L = d / dist;
+    float cosLight = abs(dot(ln, L));
+    if (cosLight < 1e-4) return vec3(0.0);
+    vec3 f = EvalBSDF(h, V, L);
+    float NdotL = dot(h.normal, L);
+    if (NdotL <= 0.0 || max(f.r, max(f.g, f.b)) <= 0.0) return vec3(0.0);
+    float pdfLight = light.pdf / (float(inst.ids.y) * area) * dist2 / cosLight;
+    vec3 vis = Transmittance(origin, L, dist * 0.999);
+    if (max(vis.r, max(vis.g, vis.b)) <= 0.0) return vec3(0.0);
+    float w = PowerHeuristic(pdfLight, PdfBSDF(h, V, L));
+    return f * NdotL * inst.emissionRoughness.rgb * vis * w / pdfLight;
+}
+
+vec3 ClampLum(vec3 c, float maxLum) {
+    float l = Luminance(c);
+    return l > maxLum ? c * (maxLum / l) : c;
 }
 
 // ---------------------------------------------------------------------------- main
@@ -178,8 +333,16 @@ void main() {
     uint rng = InitRng(px, ubo.params0.x);
     uint maxBounces = ubo.params0.y;
     uint spp = max(ubo.params0.z, 1u);
-    float clampLum = ubo.params1.x;
+    float clampLum = ubo.night.w;
     uint cur = CurrentIndex();
+
+    vec3 sunIrradiance = SunIrradianceAt(CameraAtmospherePos());
+    float sunPdf = SunPdf();
+    vec3 sunRadiance = sunIrradiance * sunPdf; // uniform disc radiance
+
+    vec3 forward = ubo.cameraBasis.xyz;
+    vec3 right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)) + vec3(1e-6, 0.0, 0.0));
+    vec3 up = cross(right, forward);
 
     vec3 total = vec3(0.0);
     vec3 firstAlbedo = vec3(1.0);
@@ -190,15 +353,28 @@ void main() {
         vec3 origin = ubo.cameraPos.xyz;
         vec3 dir = normalize(far.xyz / far.w - origin);
 
+        // Thin-lens depth of field.
+        float aperture = ubo.camera.w;
+        if (aperture > 0.0) {
+            vec3 focusPoint = origin + dir * (ubo.cameraBasis.w / max(dot(dir, forward), 1e-3));
+            float r = sqrt(Rand(rng)) * aperture;
+            float phi = 2.0 * PI * Rand(rng);
+            origin += right * (r * cos(phi)) + up * (r * sin(phi));
+            dir = normalize(focusPoint - origin);
+        }
+
         vec3 throughput = vec3(1.0);
         vec3 radiance = vec3(0.0);
+        float lastPdf = -1.0;      // < 0: previous event was delta (or the camera)
         for (uint bounce = 0u; bounce <= maxBounces; ++bounce) {
             SurfaceHit h;
             if (!TraceClosest(origin, dir, h)) {
-                vec3 sky = SkyGradient(dir) + (bounce == 0u ? SunDisc(dir) : vec3(0.0));
-                vec3 contribution = throughput * sky;
-                if (bounce > 0u && Luminance(contribution) > clampLum) contribution *= clampLum / Luminance(contribution);
-                radiance += contribution;
+                vec3 sky = SkyRadiance(dir);
+                float sunW = lastPdf < 0.0 ? 1.0 : PowerHeuristic(lastPdf, sunPdf);
+                vec3 sun = dot(dir, ubo.sunDir.xyz) >= ubo.sunDir.w ? (bounce == 0u ? SunDiscRadiance(dir) : sunRadiance) * sunW : vec3(0.0);
+                vec3 c = throughput * (sky + sun);
+                if (bounce > 0u) c = ClampLum(c, clampLum);
+                radiance += c;
                 if (bounce == 0u && s == 0u) {
                     imageStore(gAlbedo, px, vec4(1.0));
                     imageStore(gEmission, px, vec4(0.0));
@@ -213,34 +389,49 @@ void main() {
             if (bounce == 0u) {
                 // Primary emission is stored separately (noise-free) and added in the composite pass.
                 if (s == 0u) {
-                    firstAlbedo = max(h.albedo, vec3(0.03));
+                    firstAlbedo = max(mix(h.albedo, vec3(1.0), h.transmission), vec3(0.03));
                     imageStore(gAlbedo, px, vec4(firstAlbedo, 1.0));
                     imageStore(gEmission, px, vec4(h.emission, 0.0));
                     imageStore(gNormal[cur], px, vec4(h.normal, h.roughness));
                     imageStore(gPos[cur], px, vec4(h.position, 1.0));
                     imageStore(gGuide, px, vec4(h.normal, h.t));
                 }
-            } else {
-                vec3 e = throughput * h.emission;
-                if (Luminance(e) > clampLum) e *= clampLum / Luminance(e);
-                radiance += e;
+            } else if (max(h.emission.r, max(h.emission.g, h.emission.b)) > 0.0) {
+                float w = 1.0;
+                if (lastPdf >= 0.0 && h.lightPdfArea > 0.0 && (ubo.counts.z & CAMERA_LIGHT_SAMPLING) != 0u) {
+                    float cosLight = abs(dot(h.geoNormal, dir));
+                    float pdfLight = h.lightPdfArea * h.t * h.t / max(cosLight, 1e-4);
+                    w = PowerHeuristic(lastPdf, pdfLight);
+                }
+                radiance += ClampLum(throughput * h.emission * w, clampLum);
             }
 
             vec3 offsetOrigin = h.position + h.geoNormal * (1e-3 + h.t * 1e-5);
 
-            // Next-event estimation: the sun.
-            vec3 L = SampleSun(rng);
-            if (dot(L, h.geoNormal) > 0.0 && dot(L, h.normal) > 0.0 && Visible(offsetOrigin, L)) {
-                vec3 c = throughput * EvalBRDF(h, V, L) * dot(h.normal, L) * ubo.sunColor.rgb;
-                if (bounce > 0u && Luminance(c) > clampLum) c *= clampLum / Luminance(c);
-                radiance += c;
+            if (h.transmission < 1.0) {
+                // Next-event estimation: the sun (MIS with BSDF sampling).
+                vec3 L = SampleSunDirection(rng);
+                if (dot(L, h.geoNormal) > 0.0 && dot(L, h.normal) > 0.0 && max(sunIrradiance.r, sunIrradiance.g) > 0.0) {
+                    vec3 vis = Transmittance(offsetOrigin, L, 1e5);
+                    if (max(vis.r, max(vis.g, vis.b)) > 0.0) {
+                        float w = PowerHeuristic(sunPdf, PdfBSDF(h, V, L));
+                        vec3 c = throughput * EvalBSDF(h, V, L) * dot(h.normal, L) * sunIrradiance * vis * w;
+                        radiance += bounce > 0u ? ClampLum(c, clampLum) : c;
+                    }
+                }
+                // Next-event estimation: emissive surfaces.
+                vec3 e = throughput * SampleEmitters(h, V, offsetOrigin, rng);
+                radiance += bounce > 0u ? ClampLum(e, clampLum) : e;
             }
 
             if (bounce == maxBounces) break;
             vec3 weight;
-            if (!SampleBRDF(h, V, rng, dir, weight)) break;
+            float pdf;
+            if (!SampleBSDF(h, V, rng, dir, weight, pdf)) break;
             throughput *= weight;
-            origin = offsetOrigin;
+            lastPdf = pdf;
+            // Transmitted rays continue from the far side of the (thin) surface.
+            origin = dot(dir, h.geoNormal) > 0.0 ? offsetOrigin : h.position - h.geoNormal * (1e-3 + h.t * 1e-5);
 
             if (bounce >= 2u) { // Russian roulette
                 float p = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
@@ -251,6 +442,9 @@ void main() {
         total += radiance;
     }
 
-    vec3 illumination = total / float(spp);
-    imageStore(noisyIllum, px, vec4(illumination / firstAlbedo, 1.0)); // demodulated
+    // Demodulate; keep within the fp16 range of the denoiser buffers and scrub NaN/Inf
+    // (mirror-like glints divided by a dark albedo can otherwise overflow).
+    vec3 demodulated = total / float(spp) / firstAlbedo;
+    if (any(isnan(demodulated)) || any(isinf(demodulated))) demodulated = vec3(0.0);
+    imageStore(noisyIllum, px, vec4(min(demodulated, vec3(60000.0)), 1.0));
 }

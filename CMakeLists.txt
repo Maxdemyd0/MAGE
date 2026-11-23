@@ -126,6 +126,12 @@ endif()
 # -----------------------------------------------------------------------------
 #  Executables
 # -----------------------------------------------------------------------------
+# Ship sector JSON + other assets next to the binaries (one target, so parallel builds don't race).
+add_custom_target(MAGE_Assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/assets" "${MAGE_BIN_DIR}/assets"
+    COMMENT "Copying assets"
+    VERBATIM)
+
 function(mage_add_executable target)
     add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE MAGE_Engine)
@@ -137,10 +143,7 @@ function(mage_add_executable target)
         set_target_properties(${target} PROPERTIES BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
     endif()
 
-    # Ship sector JSON + other assets next to the binary.
-    add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:${target}>/assets"
-        VERBATIM)
+    add_dependencies(${target} MAGE_Assets)
 
     if(MAGE_HAS_DOTNET)
         add_custom_command(TARGET ${target} POST_BUILD

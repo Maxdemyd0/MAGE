@@ -56,6 +56,7 @@ void main() {
     if (valid) {
         vec4 hc = imageLoad(historyColor[prev], prevPx);
         vec4 hm = imageLoad(historyMoments[prev], prevPx);
+        if (any(isnan(hc)) || any(isinf(hc)) || any(isnan(hm))) { hc = vec4(illum, 1.0); hm = vec4(lum, lum * lum, 0.0, 0.0); }
         historyLength = min(hm.z + 1.0, ubo.params1.y);
         float alpha = isStatic ? 1.0 / historyLength : max(1.0 / historyLength, ubo.params1.w);
         float alphaMoments = max(1.0 / historyLength, 0.2);
@@ -64,7 +65,23 @@ void main() {
     }
 
     float variance = max(moments.y - moments.x * moments.x, 0.0);
-    if (historyLength < 4.0) variance = max(variance, 4.0 / historyLength); // young history: filter harder
+    if (historyLength < 4.0) {
+        // Young history (SVGF): estimate the variance spatially from the same surface in a 5x5
+        // neighbourhood, so the a-trous filter knows how noisy these fresh pixels really are.
+        vec2 m = vec2(0.0);
+        float wSum = 0.0;
+        for (int dy = -2; dy <= 2; ++dy)
+            for (int dx = -2; dx <= 2; ++dx) {
+                ivec2 q = clamp(px + ivec2(dx, dy), ivec2(0), size - 1);
+                vec3 nq = imageLoad(gNormal[cur], q).xyz;
+                float w = pow(max(dot(nq, normal), 0.0), 32.0);
+                float l = Luminance(imageLoad(noisyIllum, q).rgb);
+                m += w * vec2(l, l * l);
+                wSum += w;
+            }
+        m /= max(wSum, 1e-4);
+        variance = max(m.y - m.x * m.x, 0.0) * (4.0 / historyLength);
+    }
 
     imageStore(historyColor[cur], px, vec4(color, 1.0));
     imageStore(historyMoments[cur], px, vec4(moments, historyLength, 0.0));

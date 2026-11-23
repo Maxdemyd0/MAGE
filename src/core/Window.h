@@ -17,7 +17,7 @@ public:
     Window(const Window&) = delete;
     Window& operator=(const Window&) = delete;
 
-    bool Create(const std::string& title, int width, int height, bool vsync);
+    bool Create(const std::string& title, int width, int height, bool vsync, bool takeFocus = true);
     void Destroy();
 
     bool ShouldClose() const;

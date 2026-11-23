@@ -42,31 +42,58 @@ struct FrameUBO {
     glm::mat4 invViewProj;
     glm::mat4 prevViewProj;
     glm::vec4 cameraPos;
+    glm::vec4 cameraBasis;
     glm::vec4 sunDir;
-    glm::vec4 sunColor;
-    glm::vec4 skyZenith;
-    glm::vec4 skyHorizon;
-    glm::vec4 groundColor;
+    glm::vec4 solarIrradiance;
+    glm::vec4 rayleigh;
+    glm::vec4 mie;
+    glm::vec4 ozone;
+    glm::vec4 planet;
+    glm::vec4 camera;
+    glm::vec4 night;
     glm::uvec4 params0;
     glm::vec4 params1;
     glm::uvec4 size;
+    glm::uvec4 counts;
 };
-static_assert(sizeof(FrameUBO) == 2 * 64 + 9 * 16);
+static_assert(sizeof(FrameUBO) == 2 * 64 + 14 * 16);
 
 // std430 mirror of 'Instance' in shaders/common.glsl.
 struct GpuInstance {
     glm::vec4 albedoMetallic;
     glm::vec4 emissionRoughness;
+    glm::vec4 layer;
     glm::vec4 misc;
     glm::uvec4 ids;
+    glm::vec4 row0, row1, row2;
 };
-static_assert(sizeof(GpuInstance) == 64);
+static_assert(sizeof(GpuInstance) == 128);
+
+struct GpuLight {
+    uint32_t instance;
+    float cdf;
+    float pdf;
+    float pad;
+};
 
 constexpr uint32_t kFlagStatic = 1u, kFlagReset = 2u, kFlagAccumulate = 4u;
+constexpr uint32_t kCameraAutoExposure = 1u, kCameraLightSampling = 2u, kCameraAerial = 4u;
+constexpr uint32_t kInstanceTransmissive = 1u, kInstanceEmissive = 2u;
 constexpr int kFramesInFlight = 2;
+constexpr int kBloomLevels = 6;
+constexpr VkDeviceSize kExposureBufferSize = 256 * 4 + 16;
+constexpr uint32_t kLutSizes[3][2] = {{256, 64}, {32, 32}, {192, 108}}; // transmittance, multi-scatter, sky view
 
-enum Pass { PassTrace, PassTemporal, PassAtrous, PassComposite, PassCount };
-const char* kShaderFiles[PassCount] = {"pathtrace.comp.spv", "temporal.comp.spv", "atrous.comp.spv", "composite.comp.spv"};
+enum Pass {
+    PassTrace, PassTemporal, PassAtrous, PassComposite,
+    PassAtmoTransmittance, PassAtmoMultiScatter, PassAtmoSkyView,
+    PassHistogram, PassExposure, PassBloomDown, PassBloomUp, PassTonemap,
+    PassCount
+};
+const char* kShaderFiles[PassCount] = {
+    "pathtrace.comp.spv", "temporal.comp.spv", "atrous.comp.spv", "composite.comp.spv",
+    "atmo_transmittance.comp.spv", "atmo_multiscatter.comp.spv", "atmo_skyview.comp.spv",
+    "histogram.comp.spv", "exposure.comp.spv", "bloom_down.comp.spv", "bloom_up.comp.spv", "tonemap.comp.spv"};
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary | std::ios::ate);
@@ -95,11 +122,18 @@ bool NearlyEqual(const glm::mat4& a, const glm::mat4& b, float eps) {
     return true;
 }
 
+float Luminance(const glm::vec3& c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; }
+
 void Barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkAccessFlags srcAccess, VkPipelineStageFlags dst, VkAccessFlags dstAccess) {
     VkMemoryBarrier b{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     b.srcAccessMask = srcAccess;
     b.dstAccessMask = dstAccess;
     vkCmdPipelineBarrier(cmd, src, dst, 0, 1, &b, 0, nullptr, 0, nullptr);
+}
+
+void ComputeToCompute(VkCommandBuffer cmd) {
+    Barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 }
 
 } // namespace
@@ -111,7 +145,7 @@ struct FrameSlot {
     VkQueryPool queries = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     vk::AccelerationStructure tlas;
-    vk::Buffer tlasScratch, instanceBuffer, instanceData, ubo, readback;
+    vk::Buffer tlasScratch, instanceBuffer, instanceData, lights, ubo, readback, statsReadback;
     uint32_t instanceCapacity = 0;
     bool inFlight = false;
     uint64_t sequence = 0;          // submission order
@@ -127,12 +161,18 @@ struct PathTracer::Impl {
     // Static geometry (all meshes concatenated) + one BLAS per mesh.
     vk::Buffer vertices, indices, meshTable;
     std::vector<vk::AccelerationStructure> blas;
+    std::vector<uint32_t> meshTriangles;
+    std::vector<glm::vec3> meshExtents;
 
     // Render targets shared by both frame slots (ordered on the single queue).
     struct Targets {
-        vk::Image noisy, albedo, emission, guide, output;
+        vk::Image noisy, albedo, emission, guide, output, hdr;
         vk::Image normal[2], position[2], historyColor[2], historyMoments[2], filter[2];
+        vk::Image bloom[kBloomLevels];
     } targets;
+    vk::Image luts[3];
+    vk::Buffer exposure;
+    VkSampler sampler = VK_NULL_HANDLE;
     uint32_t width = 0, height = 0;
 
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
@@ -147,11 +187,13 @@ struct PathTracer::Impl {
     uint32_t glWidth = 0, glHeight = 0;
     bool hasResult = false;
     Clock::time_point fpsWindowStart = Clock::now();
+    Clock::time_point lastRender = Clock::now();
     uint64_t fpsWindowFrames = 0;
 
     uint32_t frameIndex = 0;
     glm::mat4 prevViewProj{1.0f};
     bool resetRequested = true;
+    uint64_t atmosphereHash = 0;
 
     // Static-scene baseline (captured whenever accumulation restarts).
     std::vector<glm::mat4> baselineModels;
@@ -160,9 +202,12 @@ struct PathTracer::Impl {
     glm::vec3 baselineCamPos{0.0f}, baselineCamTarget{0.0f};
     float baselineFov = 0.0f, baselineAspect = 0.0f;
     std::vector<glm::mat4> currentModels;
+    std::vector<GpuInstance> instanceScratch;
+    std::vector<GpuLight> lightScratch;
 
     bool CreatePipelines(const std::filesystem::path& shaderDir);
     bool BuildGeometry(const MeshLibrary& meshes);
+    void CreateLuts();
     void CreateSlot(FrameSlot& slot);
     void DestroySlot(FrameSlot& slot);
     void EnsureInstanceCapacity(FrameSlot& slot, uint32_t count);
@@ -189,6 +234,14 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     for (uint32_t b = 9; b <= 13; ++b) add(b, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2);
     add(14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     add(15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    add(16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    add(17, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    add(18, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
+    add(19, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    add(20, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 3);
+    add(21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3);
+    add(22, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kBloomLevels);
+    add(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBloomLevels);
 
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     lci.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -230,14 +283,23 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     }
 
     const VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, kFramesInFlight},
-                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * kFramesInFlight},
+                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 * kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
-                                          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 15 * kFramesInFlight}};
+                                          {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, (16 + 3 + kBloomLevels) * kFramesInFlight},
+                                          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (1 + 3 + kBloomLevels) * kFramesInFlight}};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = kFramesInFlight;
-    dpci.poolSizeCount = 4;
+    dpci.poolSizeCount = 5;
     dpci.pPoolSizes = sizes;
     vkCreateDescriptorPool(dev, &dpci, nullptr, &descriptorPool);
+
+    VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    sci.magFilter = VK_FILTER_LINEAR;
+    sci.minFilter = VK_FILTER_LINEAR;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sci.maxLod = 0.0f;
+    vkCreateSampler(dev, &sci, nullptr, &sampler);
     return true;
 }
 
@@ -250,6 +312,9 @@ bool PathTracer::Impl::BuildGeometry(const MeshLibrary& meshes) {
         const MeshData* d = meshes.GetData(h);
         table.emplace_back(static_cast<uint32_t>(indexData.size()), static_cast<uint32_t>(vertexData.size() / 8),
                            d ? static_cast<uint32_t>(d->indices.size()) : 0u, 0u);
+        meshTriangles.push_back(d ? static_cast<uint32_t>(d->indices.size() / 3) : 0u);
+        const Mesh* mesh = meshes.Get(h);
+        meshExtents.push_back(mesh ? mesh->bounds.max - mesh->bounds.min : glm::vec3(1.0f));
         if (!d) continue;
         for (const Vertex& v : d->vertices)
             vertexData.insert(vertexData.end(), {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y});
@@ -322,6 +387,30 @@ bool PathTracer::Impl::BuildGeometry(const MeshLibrary& meshes) {
     return true;
 }
 
+// Atmosphere LUTs (fixed size) + the persistent auto-exposure buffer.
+void PathTracer::Impl::CreateLuts() {
+    for (int i = 0; i < 3; ++i) luts[i] = ctx.CreateImage(kLutSizes[i][0], kLutSizes[i][1], VK_FORMAT_R16G16B16A16_SFLOAT);
+    exposure = ctx.CreateBuffer(kExposureBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                                         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                vk::MemoryKind::GpuOnly);
+    VkCommandBuffer c = ctx.BeginOneShot();
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    for (const vk::Image& img : luts) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = range;
+        vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        const VkClearColorValue zero{};
+        vkCmdClearColorImage(c, img.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &range);
+    }
+    vkCmdFillBuffer(c, exposure.buffer, 0, VK_WHOLE_SIZE, 0);
+    ctx.EndOneShot(c);
+}
+
 void PathTracer::Impl::CreateSlot(FrameSlot& slot) {
     VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     ai.commandPool = ctx.commandPool;
@@ -340,12 +429,14 @@ void PathTracer::Impl::CreateSlot(FrameSlot& slot) {
     dsai.pSetLayouts = &setLayout;
     vkAllocateDescriptorSets(ctx.device, &dsai, &slot.descriptorSet);
     slot.ubo = ctx.CreateBuffer(sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, vk::MemoryKind::Upload);
+    slot.statsReadback = ctx.CreateBuffer(16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, vk::MemoryKind::Readback);
     EnsureInstanceCapacity(slot, 1024);
 }
 
 void PathTracer::Impl::DestroySlot(FrameSlot& slot) {
     ctx.DestroyAccelerationStructure(slot.tlas);
-    for (vk::Buffer* b : {&slot.tlasScratch, &slot.instanceBuffer, &slot.instanceData, &slot.ubo, &slot.readback}) ctx.DestroyBuffer(*b);
+    for (vk::Buffer* b : {&slot.tlasScratch, &slot.instanceBuffer, &slot.instanceData, &slot.lights, &slot.ubo, &slot.readback, &slot.statsReadback})
+        ctx.DestroyBuffer(*b);
     if (slot.fence) vkDestroyFence(ctx.device, slot.fence, nullptr);
     if (slot.queries) vkDestroyQueryPool(ctx.device, slot.queries, nullptr);
     slot = FrameSlot{};
@@ -358,10 +449,12 @@ void PathTracer::Impl::EnsureInstanceCapacity(FrameSlot& slot, uint32_t count) {
     ctx.DestroyBuffer(slot.tlasScratch);
     ctx.DestroyBuffer(slot.instanceBuffer);
     ctx.DestroyBuffer(slot.instanceData);
+    ctx.DestroyBuffer(slot.lights);
 
     slot.instanceBuffer = ctx.CreateBuffer(capacity * sizeof(VkAccelerationStructureInstanceKHR),
                                            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, vk::MemoryKind::Upload);
     slot.instanceData = ctx.CreateBuffer(capacity * sizeof(GpuInstance), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, vk::MemoryKind::Upload);
+    slot.lights = ctx.CreateBuffer(capacity * sizeof(GpuLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, vk::MemoryKind::Upload);
 
     VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
@@ -390,26 +483,31 @@ void PathTracer::Impl::WriteSceneDescriptors(FrameSlot& slot) {
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     asWrite.accelerationStructureCount = 1;
     asWrite.pAccelerationStructures = &slot.tlas.handle;
-    const VkDescriptorBufferInfo bufferInfos[5] = {{vertices.buffer, 0, VK_WHOLE_SIZE},
+    const VkDescriptorBufferInfo bufferInfos[7] = {{vertices.buffer, 0, VK_WHOLE_SIZE},
                                                    {indices.buffer, 0, VK_WHOLE_SIZE},
                                                    {meshTable.buffer, 0, VK_WHOLE_SIZE},
                                                    {slot.instanceData.buffer, 0, VK_WHOLE_SIZE},
-                                                   {slot.ubo.buffer, 0, sizeof(FrameUBO)}};
-    VkWriteDescriptorSet writes[6] = {};
+                                                   {slot.ubo.buffer, 0, sizeof(FrameUBO)},
+                                                   {slot.lights.buffer, 0, VK_WHOLE_SIZE},
+                                                   {exposure.buffer, 0, VK_WHOLE_SIZE}};
+    const uint32_t bufferBindings[7] = {1, 2, 3, 4, 5, 16, 17};
+    VkWriteDescriptorSet writes[8] = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &asWrite, slot.descriptorSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR};
-    for (uint32_t i = 0; i < 5; ++i) {
-        writes[i + 1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.descriptorSet, i + 1, 0, 1,
-                         i == 4 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+    for (uint32_t i = 0; i < 7; ++i) {
+        writes[i + 1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.descriptorSet, bufferBindings[i], 0, 1,
+                         bufferBindings[i] == 5 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
         writes[i + 1].pBufferInfo = &bufferInfos[i];
     }
-    vkUpdateDescriptorSets(ctx.device, 6, writes, 0, nullptr);
+    vkUpdateDescriptorSets(ctx.device, 8, writes, 0, nullptr);
 }
 
 void PathTracer::Impl::DestroyTargets() {
-    for (vk::Image* img : {&targets.noisy, &targets.albedo, &targets.emission, &targets.guide, &targets.output}) ctx.DestroyImage(*img);
+    for (vk::Image* img : {&targets.noisy, &targets.albedo, &targets.emission, &targets.guide, &targets.output, &targets.hdr})
+        ctx.DestroyImage(*img);
     for (int i = 0; i < 2; ++i)
         for (vk::Image* img : {&targets.normal[i], &targets.position[i], &targets.historyColor[i], &targets.historyMoments[i], &targets.filter[i]})
             ctx.DestroyImage(*img);
+    for (vk::Image& img : targets.bloom) ctx.DestroyImage(img);
     for (FrameSlot& slot : slots) ctx.DestroyBuffer(slot.readback);
 }
 
@@ -423,6 +521,7 @@ void PathTracer::Impl::RecreateTargets(uint32_t w, uint32_t h) {
     targets.emission = ctx.CreateImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT);
     targets.guide = ctx.CreateImage(w, h, VK_FORMAT_R32G32B32A32_SFLOAT);
     targets.output = ctx.CreateImage(w, h, VK_FORMAT_R8G8B8A8_UNORM);
+    targets.hdr = ctx.CreateImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT);
     for (int i = 0; i < 2; ++i) {
         targets.normal[i] = ctx.CreateImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT);
         targets.position[i] = ctx.CreateImage(w, h, VK_FORMAT_R32G32B32A32_SFLOAT);
@@ -430,15 +529,19 @@ void PathTracer::Impl::RecreateTargets(uint32_t w, uint32_t h) {
         targets.historyMoments[i] = ctx.CreateImage(w, h, VK_FORMAT_R32G32B32A32_SFLOAT);
         targets.filter[i] = ctx.CreateImage(w, h, VK_FORMAT_R16G16B16A16_SFLOAT);
     }
+    for (int i = 0; i < kBloomLevels; ++i)
+        targets.bloom[i] = ctx.CreateImage(std::max(1u, w >> (i + 1)), std::max(1u, h >> (i + 1)), VK_FORMAT_R16G16B16A16_SFLOAT);
     for (FrameSlot& slot : slots)
         slot.readback = ctx.CreateBuffer(static_cast<VkDeviceSize>(w) * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, vk::MemoryKind::Readback);
 
     // UNDEFINED -> GENERAL and clear everything to zero.
     VkCommandBuffer c = ctx.BeginOneShot();
-    std::vector<VkImage> all = {targets.noisy.image, targets.albedo.image, targets.emission.image, targets.guide.image, targets.output.image};
+    std::vector<VkImage> all = {targets.noisy.image, targets.albedo.image, targets.emission.image, targets.guide.image,
+                                targets.output.image, targets.hdr.image};
     for (int i = 0; i < 2; ++i)
         for (const vk::Image* img : {&targets.normal[i], &targets.position[i], &targets.historyColor[i], &targets.historyMoments[i], &targets.filter[i]})
             all.push_back(img->image);
+    for (const vk::Image& img : targets.bloom) all.push_back(img.image);
     const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     std::vector<VkImageMemoryBarrier> barriers;
     for (VkImage img : all) {
@@ -462,25 +565,42 @@ void PathTracer::Impl::RecreateTargets(uint32_t w, uint32_t h) {
 }
 
 void PathTracer::Impl::WriteImageDescriptors(VkDescriptorSet set) {
-    auto info = [](const vk::Image& img) { return VkDescriptorImageInfo{VK_NULL_HANDLE, img.view, VK_IMAGE_LAYOUT_GENERAL}; };
-    const VkDescriptorImageInfo singles[5] = {info(targets.noisy), info(targets.albedo), info(targets.emission), info(targets.output),
-                                              info(targets.guide)};
-    const VkDescriptorImageInfo pairs[5][2] = {{info(targets.normal[0]), info(targets.normal[1])},
-                                               {info(targets.position[0]), info(targets.position[1])},
-                                               {info(targets.historyColor[0]), info(targets.historyColor[1])},
-                                               {info(targets.historyMoments[0]), info(targets.historyMoments[1])},
-                                               {info(targets.filter[0]), info(targets.filter[1])}};
-    VkWriteDescriptorSet writes[10] = {};
-    const uint32_t singleBindings[5] = {6, 7, 8, 14, 15};
-    for (int i = 0; i < 5; ++i) {
-        writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, singleBindings[i], 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-        writes[i].pImageInfo = &singles[i];
+    auto storage = [](const vk::Image& img) { return VkDescriptorImageInfo{VK_NULL_HANDLE, img.view, VK_IMAGE_LAYOUT_GENERAL}; };
+    auto sampled = [this](const vk::Image& img) { return VkDescriptorImageInfo{sampler, img.view, VK_IMAGE_LAYOUT_GENERAL}; };
+
+    const VkDescriptorImageInfo singles[6] = {storage(targets.noisy), storage(targets.albedo), storage(targets.emission),
+                                              storage(targets.output), storage(targets.guide), storage(targets.hdr)};
+    const uint32_t singleBindings[6] = {6, 7, 8, 14, 15, 18};
+    const VkDescriptorImageInfo pairs[5][2] = {{storage(targets.normal[0]), storage(targets.normal[1])},
+                                               {storage(targets.position[0]), storage(targets.position[1])},
+                                               {storage(targets.historyColor[0]), storage(targets.historyColor[1])},
+                                               {storage(targets.historyMoments[0]), storage(targets.historyMoments[1])},
+                                               {storage(targets.filter[0]), storage(targets.filter[1])}};
+    const VkDescriptorImageInfo hdrSampled = sampled(targets.hdr);
+    VkDescriptorImageInfo lutStorage[3], lutSampled[3], bloomStorage[kBloomLevels], bloomSampled[kBloomLevels];
+    for (int i = 0; i < 3; ++i) {
+        lutStorage[i] = storage(luts[i]);
+        lutSampled[i] = sampled(luts[i]);
     }
-    for (int i = 0; i < 5; ++i) {
-        writes[5 + i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, static_cast<uint32_t>(9 + i), 0, 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-        writes[5 + i].pImageInfo = pairs[i];
+    for (int i = 0; i < kBloomLevels; ++i) {
+        bloomStorage[i] = storage(targets.bloom[i]);
+        bloomSampled[i] = sampled(targets.bloom[i]);
     }
-    vkUpdateDescriptorSets(ctx.device, 10, writes, 0, nullptr);
+
+    std::vector<VkWriteDescriptorSet> writes;
+    auto write = [&](uint32_t binding, uint32_t count, VkDescriptorType type, const VkDescriptorImageInfo* infos) {
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, binding, 0, count, type};
+        w.pImageInfo = infos;
+        writes.push_back(w);
+    };
+    for (int i = 0; i < 6; ++i) write(singleBindings[i], 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &singles[i]);
+    for (int i = 0; i < 5; ++i) write(static_cast<uint32_t>(9 + i), 2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, pairs[i]);
+    write(19, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hdrSampled);
+    write(20, 3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, lutStorage);
+    write(21, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, lutSampled);
+    write(22, kBloomLevels, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, bloomStorage);
+    write(23, kBloomLevels, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, bloomSampled);
+    vkUpdateDescriptorSets(ctx.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void PathTracer::Impl::WaitIdle() {
@@ -501,6 +621,13 @@ void PathTracer::Impl::CollectFinished() {
         if (vkGetQueryPoolResults(ctx.device, oldest->queries, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
             stats.gpuMs = static_cast<double>(timestamps[1] - timestamps[0]) * ctx.timestampPeriodNs * 1e-6;
+        if (oldest->statsReadback.mapped) {
+            vmaInvalidateAllocation(ctx.allocator, oldest->statsReadback.allocation, 0, VK_WHOLE_SIZE);
+            float values[4];
+            std::memcpy(values, oldest->statsReadback.mapped, sizeof(values));
+            stats.ev100 = values[1];
+            stats.sceneLuminance = values[2];
+        }
         if (oldest->sequence > lastDisplayed && oldest->readback.buffer) Display(*oldest);
     }
 }
@@ -553,10 +680,11 @@ bool PathTracer::Init(const std::filesystem::path& shaderDirectory, const MeshLi
         Shutdown();
         return false;
     }
+    m->CreateLuts();
     for (FrameSlot& slot : m->slots) m->CreateSlot(slot);
     m->ready = true;
     m->stats.available = true;
-    Log::Info("Path tracer ready on {} ({} frames in flight)", m->ctx.deviceName, kFramesInFlight);
+    Log::Info("Path tracer ready on {} ({} frames in flight, physical sky + camera)", m->ctx.deviceName, kFramesInFlight);
     return true;
 }
 
@@ -568,14 +696,17 @@ void PathTracer::Shutdown() {
     for (FrameSlot& slot : m->slots) m->DestroySlot(slot);
     for (auto& as : m->blas) m->ctx.DestroyAccelerationStructure(as);
     m->blas.clear();
-    for (vk::Buffer* b : {&m->vertices, &m->indices, &m->meshTable}) m->ctx.DestroyBuffer(*b);
+    for (vk::Image& img : m->luts) m->ctx.DestroyImage(img);
+    for (vk::Buffer* b : {&m->vertices, &m->indices, &m->meshTable, &m->exposure}) m->ctx.DestroyBuffer(*b);
     for (VkPipeline& p : m->pipelines) {
         if (p) vkDestroyPipeline(dev, p, nullptr);
         p = VK_NULL_HANDLE;
     }
+    if (m->sampler) vkDestroySampler(dev, m->sampler, nullptr);
     if (m->pipelineLayout) vkDestroyPipelineLayout(dev, m->pipelineLayout, nullptr);
     if (m->setLayout) vkDestroyDescriptorSetLayout(dev, m->setLayout, nullptr);
     if (m->descriptorPool) vkDestroyDescriptorPool(dev, m->descriptorPool, nullptr);
+    m->sampler = VK_NULL_HANDLE;
     m->pipelineLayout = VK_NULL_HANDLE;
     m->setLayout = VK_NULL_HANDLE;
     m->descriptorPool = VK_NULL_HANDLE;
@@ -608,52 +739,102 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         if (!candidate.inFlight) { slot = &candidate; break; }
     if (!slot) return s.hasResult ? s.glTexture : 0;
 
-    // ---- Instances (TLAS input + materials) -------------------------------------------------------
+    const auto now = Clock::now();
+    const float dt = std::chrono::duration<float>(now - s.lastRender).count();
+    s.lastRender = now;
+
+    // ---- Instances (TLAS input + materials) and emissive light list ---------------------------
     s.EnsureInstanceCapacity(*slot, static_cast<uint32_t>(commands.size()));
     auto* vkInstances = static_cast<VkAccelerationStructureInstanceKHR*>(slot->instanceBuffer.mapped);
-    auto* gpuInstances = static_cast<GpuInstance*>(slot->instanceData.mapped);
-    Hasher materialHash;
     s.currentModels.clear();
+    s.instanceScratch.clear();
+    s.lightScratch.clear();
+    float lightTotal = 0.0f;
     uint32_t count = 0;
     for (const DrawCommand& c : commands) {
         if (c.mesh >= s.blas.size() || !s.blas[c.mesh].handle) continue;
+        const Material& mat = c.material;
+        const bool transmissive = mat.transmission > 0.0f;
+        const float emitted = Luminance(mat.emissive);
+
         VkAccelerationStructureInstanceKHR inst{};
         for (int r = 0; r < 3; ++r)
             for (int col = 0; col < 4; ++col) inst.transform.matrix[r][col] = c.model[col][r];
         inst.instanceCustomIndex = count;
         inst.mask = 0xFF;
-        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
+                     (transmissive ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : 0u);
         inst.accelerationStructureReference = s.blas[c.mesh].address;
-        vkInstances[count] = inst;
+        vkInstances[count] = inst; // write-only: mapped memory is write-combined
 
-        // Build locally and only *write* to the mapped buffer: it is write-combined memory, and
-        // reading it back (e.g. for hashing) costs tens of milliseconds per frame.
-        const Material& mat = c.material;
-        const GpuInstance gi{glm::vec4(mat.albedo, mat.metallic), glm::vec4(mat.emissive, mat.roughness),
-                             glm::vec4(mat.checkerScale, 0.0f, 0.0f, 0.0f), glm::uvec4(c.mesh, 0u, 0u, 0u)};
-        gpuInstances[count] = gi;
-        materialHash.Add(gi);
+        GpuInstance gi{};
+        gi.albedoMetallic = glm::vec4(mat.albedo, mat.metallic);
+        gi.emissionRoughness = glm::vec4(mat.emissive, mat.roughness);
+        gi.layer = glm::vec4(mat.checkerScale, mat.clearcoat, mat.clearcoatRoughness, std::clamp(mat.transmission, 0.0f, 1.0f));
+        gi.misc = glm::vec4(mat.ior, 0.0f, 0.0f, 0.0f);
+        gi.ids = glm::uvec4(c.mesh, s.meshTriangles[c.mesh], (transmissive ? kInstanceTransmissive : 0u) | (emitted > 0.0f ? kInstanceEmissive : 0u), 0u);
+        gi.row0 = glm::vec4(c.model[0][0], c.model[1][0], c.model[2][0], c.model[3][0]);
+        gi.row1 = glm::vec4(c.model[0][1], c.model[1][1], c.model[2][1], c.model[3][1]);
+        gi.row2 = glm::vec4(c.model[0][2], c.model[1][2], c.model[2][2], c.model[3][2]);
+        s.instanceScratch.push_back(gi);
+
+        if (emitted > 0.0f && settings.lightSampling) {
+            // Select lights proportionally to emitted power ~ luminance * surface area.
+            const glm::vec3 e = s.meshExtents[c.mesh] *
+                                glm::vec3(glm::length(glm::vec3(c.model[0])), glm::length(glm::vec3(c.model[1])), glm::length(glm::vec3(c.model[2])));
+            const float area = 2.0f * (e.x * e.y + e.y * e.z + e.x * e.z) + 1e-4f;
+            const float weight = emitted * area;
+            s.lightScratch.push_back(GpuLight{count, weight, 0.0f, 0.0f});
+            lightTotal += weight;
+        }
         s.currentModels.push_back(c.model);
         ++count;
     }
     s.stats.instances = count;
     if (count == 0) return s.hasResult ? s.glTexture : 0;
 
+    float running = 0.0f;
+    for (GpuLight& l : s.lightScratch) {
+        l.pdf = l.cdf / lightTotal;
+        running += l.pdf;
+        l.cdf = running;
+        s.instanceScratch[l.instance].misc.y = l.pdf;
+    }
+    if (!s.lightScratch.empty()) s.lightScratch.back().cdf = 1.0f;
+    s.stats.lights = static_cast<uint32_t>(s.lightScratch.size());
+    std::memcpy(slot->instanceData.mapped, s.instanceScratch.data(), s.instanceScratch.size() * sizeof(GpuInstance));
+    if (!s.lightScratch.empty()) std::memcpy(slot->lights.mapped, s.lightScratch.data(), s.lightScratch.size() * sizeof(GpuLight));
+
+    Hasher materialHash;
+    for (const GpuInstance& gi : s.instanceScratch) {
+        materialHash.Add(gi.albedoMetallic);
+        materialHash.Add(gi.emissionRoughness);
+        materialHash.Add(gi.layer);
+        materialHash.Add(gi.misc);
+        materialHash.Add(gi.ids);
+    }
+
     // ---- Static detection: compare against the snapshot taken when accumulation started ----------
     const float aspect = static_cast<float>(outputWidth) / static_cast<float>(outputHeight);
     const glm::mat4 viewProj = camera.Projection(aspect) * camera.View();
     Hasher settingsHash;
     settingsHash.Add(lighting.sunDirection);
-    settingsHash.Add(lighting.sunColor);
-    settingsHash.Add(lighting.sunIntensity);
-    settingsHash.Add(lighting.skyZenith);
-    settingsHash.Add(lighting.skyHorizon);
-    settingsHash.Add(lighting.groundColor);
     settingsHash.Add(settings.maxBounces);
     settingsHash.Add(settings.samplesPerPixel);
-    settingsHash.Add(settings.sunAngularDiameterDeg);
-    settingsHash.Add(settings.skyIntensity);
+    settingsHash.Add(settings.lightSampling);
     settingsHash.Add(settings.fireflyClamp);
+    settingsHash.Add(settings.sunAngularDiameterDeg);
+    settingsHash.Add(settings.sunIntensity);
+    settingsHash.Add(settings.rayleighScale);
+    settingsHash.Add(settings.hazeDensity);
+    settingsHash.Add(settings.mieAnisotropy);
+    settingsHash.Add(settings.ozoneScale);
+    settingsHash.Add(settings.groundAlbedo);
+    settingsHash.Add(settings.groundAltitudeKm);
+    settingsHash.Add(settings.nightSkyLuminance);
+    settingsHash.Add(settings.depthOfField);
+    settingsHash.Add(settings.fStop);
+    settingsHash.Add(settings.focusDistance);
 
     const float tol = std::max(settings.staticTolerance, 0.0f);
     const bool cameraStatic = glm::all(glm::lessThanEqual(glm::abs(camera.position - s.baselineCamPos), glm::vec3(tol))) &&
@@ -684,21 +865,44 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
     FrameUBO ubo{};
     ubo.invViewProj = glm::inverse(viewProj);
     ubo.prevViewProj = reset ? viewProj : s.prevViewProj;
-    ubo.cameraPos = glm::vec4(camera.position, 1.0f);
+    ubo.cameraPos = glm::vec4(camera.position, dt);
+    const float focus = settings.focusDistance > 0.0f ? settings.focusDistance : glm::length(camera.target - camera.position);
+    ubo.cameraBasis = glm::vec4(camera.Forward(), std::max(focus, 0.1f));
     const float halfAngle = glm::radians(std::max(settings.sunAngularDiameterDeg, 0.01f) * 0.5f);
     ubo.sunDir = glm::vec4(glm::normalize(lighting.sunDirection), std::cos(halfAngle));
-    ubo.sunColor = glm::vec4(lighting.sunColor * lighting.sunIntensity, 0.0f);
-    ubo.skyZenith = glm::vec4(lighting.skyZenith, settings.skyIntensity);
-    ubo.skyHorizon = glm::vec4(lighting.skyHorizon, lighting.exposure * settings.exposure);
-    ubo.groundColor = glm::vec4(lighting.groundColor, lighting.fogDensity);
+    ubo.solarIrradiance = glm::vec4(glm::vec3(1.474f, 1.8504f, 1.91198f) * settings.sunIntensity, halfAngle);
+    ubo.rayleigh = glm::vec4(glm::vec3(5.802e-3f, 13.558e-3f, 33.1e-3f) * settings.rayleighScale, 8.0f);
+    ubo.mie = glm::vec4(3.996e-3f, 4.440e-3f, std::clamp(settings.mieAnisotropy, 0.0f, 0.95f), 1.2f);
+    ubo.ozone = glm::vec4(glm::vec3(0.650e-3f, 1.881e-3f, 0.085e-3f) * settings.ozoneScale, settings.groundAlbedo);
+    ubo.planet = glm::vec4(6360.0f, 6460.0f, settings.groundAltitudeKm, std::max(settings.hazeDensity, 0.0f));
+    // Physical aperture: focal length from the vertical FOV on a 24 mm (full-frame) sensor.
+    const float focalLength = 0.012f / std::tan(glm::radians(camera.fovDegrees) * 0.5f);
+    const float apertureRadius = settings.depthOfField ? focalLength / (2.0f * std::max(settings.fStop, 0.5f)) : 0.0f;
+    ubo.camera = glm::vec4(settings.exposureCompensation, settings.manualEV100, std::clamp(settings.bloomIntensity, 0.0f, 1.0f), apertureRadius);
+    const glm::vec3 nightTint(0.6f, 0.75f, 1.0f);
+    ubo.night = glm::vec4(nightTint / Luminance(nightTint) * (settings.nightSkyLuminance / kRadianceToLuminance), settings.fireflyClamp);
     const uint32_t flags = (isStatic ? kFlagStatic : 0u) | (reset ? kFlagReset : 0u) | (settings.accumulate ? kFlagAccumulate : 0u);
     ubo.params0 = glm::uvec4(s.frameIndex, static_cast<uint32_t>(std::clamp(settings.maxBounces, 0, 16)),
                              static_cast<uint32_t>(std::clamp(settings.samplesPerPixel, 1, 64)), flags);
-    ubo.params1 = glm::vec4(settings.fireflyClamp, static_cast<float>(std::max(settings.maxHistory, 1)), settings.colorSigma,
+    ubo.params1 = glm::vec4(kRadianceToLuminance, static_cast<float>(std::max(settings.maxHistory, 1)), settings.colorSigma,
                             std::clamp(settings.movingMinAlpha, 0.01f, 1.0f));
     const int iterations = settings.denoise ? std::clamp(settings.atrousIterations, 0, 8) : 0;
     ubo.size = glm::uvec4(w, h, count, static_cast<uint32_t>(iterations));
+    const uint32_t cameraFlags = (settings.autoExposure ? kCameraAutoExposure : 0u) | (settings.lightSampling ? kCameraLightSampling : 0u) |
+                                 (settings.aerialPerspective ? kCameraAerial : 0u);
+    ubo.counts = glm::uvec4(static_cast<uint32_t>(s.lightScratch.size()), settings.bloomIntensity > 0.0f ? kBloomLevels : 0, cameraFlags, 0u);
     std::memcpy(slot->ubo.mapped, &ubo, sizeof(ubo));
+
+    // Atmosphere LUTs that only depend on the medium (not the sun): rebuild when it changes.
+    Hasher atmoHash;
+    atmoHash.Add(ubo.rayleigh);
+    atmoHash.Add(ubo.mie);
+    atmoHash.Add(ubo.ozone);
+    atmoHash.Add(ubo.planet.x);
+    atmoHash.Add(ubo.planet.y);
+    atmoHash.Add(ubo.planet.w);
+    const bool rebuildAtmosphere = atmoHash.h != s.atmosphereHash;
+    s.atmosphereHash = atmoHash.h;
 
     // ---- Record ------------------------------------------------------------------------------------
     VkCommandBuffer cmd = slot->cmd;
@@ -713,6 +917,23 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, slot->queries, 0);
 
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelineLayout, 0, 1, &slot->descriptorSet, 0, nullptr);
+    auto dispatch = [&](Pass pass, glm::ivec4 push, uint32_t gx, uint32_t gy) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelines[pass]);
+        vkCmdPushConstants(cmd, s.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vkCmdDispatch(cmd, gx, gy, 1);
+        ComputeToCompute(cmd);
+    };
+    auto groups = [](uint32_t n, uint32_t local) { return (n + local - 1) / local; };
+
+    // Atmosphere.
+    if (rebuildAtmosphere) {
+        dispatch(PassAtmoTransmittance, glm::ivec4(0), groups(kLutSizes[0][0], 8), groups(kLutSizes[0][1], 8));
+        dispatch(PassAtmoMultiScatter, glm::ivec4(0), kLutSizes[1][0], kLutSizes[1][1]);
+    }
+    dispatch(PassAtmoSkyView, glm::ivec4(0), groups(kLutSizes[2][0], 8), groups(kLutSizes[2][1], 8));
+
+    // Scene acceleration structure.
     VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
     geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
     geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
@@ -731,29 +952,35 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
     Barrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelineLayout, 0, 1, &slot->descriptorSet, 0, nullptr);
-    const uint32_t gx = (w + 7) / 8, gy = (h + 7) / 8;
-    auto dispatch = [&](Pass pass, glm::ivec4 push) {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipelines[pass]);
-        vkCmdPushConstants(cmd, s.pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd, gx, gy, 1);
-        Barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-    };
-    dispatch(PassTrace, glm::ivec4(0));
-    dispatch(PassTemporal, glm::ivec4(0));
+    // Light transport + denoise.
+    const uint32_t gx = groups(w, 8), gy = groups(h, 8);
+    dispatch(PassTrace, glm::ivec4(0), gx, gy);
+    dispatch(PassTemporal, glm::ivec4(0), gx, gy);
     int src = 0;
     for (int i = 0; i < iterations; ++i) {
-        dispatch(PassAtrous, glm::ivec4(1 << i, src, src ^ 1, 0));
+        dispatch(PassAtrous, glm::ivec4(1 << i, src, src ^ 1, 0), gx, gy);
         src ^= 1;
     }
-    dispatch(PassComposite, glm::ivec4(0, src, 0, 0));
+    dispatch(PassComposite, glm::ivec4(0, src, 0, 0), gx, gy);
+
+    // Camera: metering, bloom, tonemapping.
+    dispatch(PassHistogram, glm::ivec4(0), groups(w, 16), groups(h, 16));
+    dispatch(PassExposure, glm::ivec4(0), 1, 1);
+    if (ubo.counts.y > 0) {
+        for (int level = 0; level < kBloomLevels; ++level)
+            dispatch(PassBloomDown, glm::ivec4(level, 0, 0, 0), groups(std::max(1u, w >> (level + 1)), 8), groups(std::max(1u, h >> (level + 1)), 8));
+        for (int level = kBloomLevels - 2; level >= 0; --level)
+            dispatch(PassBloomUp, glm::ivec4(level, 0, 0, 0), groups(std::max(1u, w >> (level + 1)), 8), groups(std::max(1u, h >> (level + 1)), 8));
+    }
+    dispatch(PassTonemap, glm::ivec4(0), gx, gy);
 
     Barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     VkBufferImageCopy copy{};
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {w, h, 1};
     vkCmdCopyImageToBuffer(cmd, s.targets.output.image, VK_IMAGE_LAYOUT_GENERAL, slot->readback.buffer, 1, &copy);
+    const VkBufferCopy statsCopy{256 * 4, 0, 16};
+    vkCmdCopyBuffer(cmd, s.exposure.buffer, slot->statsReadback.buffer, 1, &statsCopy);
     Barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, slot->queries, 1);
     vkEndCommandBuffer(cmd);

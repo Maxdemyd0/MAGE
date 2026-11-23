@@ -13,6 +13,8 @@
 //    --no-scripts         skip .NET (native C++ controller drives the car)
 //    --no-streaming       disable the sector streamer
 //    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
+//    --background         do not take window focus; ignore the real keyboard (automated runs)
+//    --sun-elevation <d>  time of day as sun elevation in degrees (-18 night .. 90 noon)
 //    --autodrive          demo autopilot: injects W/D key presses (exercises C++ -> C# -> Jolt)
 //    --quit-after <s>     exit after <s> seconds (smoke tests / CI)
 //    --screenshot <file>  save a .bmp of the last frame before quitting
@@ -36,6 +38,7 @@ int main(int argc, char** argv) {
     mage::EngineConfig config;
     config.title = "MAGE v1 Runtime - Vehicle Testbed";
     double quitAfterSeconds = 0.0;
+    float sunElevation = -1000.0f; // --sun-elevation <deg>: time of day for tests / screenshots
     bool autodrive = false;
     std::string screenshotPath;
     for (int i = 1; i < argc; ++i) {
@@ -48,6 +51,8 @@ int main(int argc, char** argv) {
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
         else if (arg == "--raster") config.enablePathTracing = false;
+        else if (arg == "--background") config.background = true;
+        else if (arg == "--sun-elevation" && i + 1 < argc) sunElevation = static_cast<float>(std::atof(argv[++i]));
     }
 
     mage::Engine engine;
@@ -58,6 +63,11 @@ int main(int argc, char** argv) {
 
     mage::Testbed testbed;
     testbed.Build(engine);
+    if (sunElevation > -90.0f) {
+        auto& sun = engine.GetRenderer().lighting.sunDirection;
+        const float azimuth = std::atan2(sun.x, sun.z), e = sunElevation * 3.14159265f / 180.0f;
+        sun = glm::vec3(std::cos(e) * std::sin(azimuth), std::sin(e), std::cos(e) * std::cos(azimuth));
+    }
 
     bool showTuning = true;
     bool showPathTracer = true;

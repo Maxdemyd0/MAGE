@@ -51,8 +51,14 @@ void Input::EndFrame() {
     if (glfwGetWindowAttrib(m_window, GLFW_FOCUSED) == 0) m_keys.fill(0);
 }
 
-bool Input::IsKeyDown(int key) const { return m_gameInput && IsKeyDownRaw(key); }
-bool Input::IsKeyPressed(int key) const { return m_gameInput && IsKeyPressedRaw(key); }
+bool Input::IsKeyDown(int key) const {
+    if (key < 0 || key >= kMaxKeys) return false;
+    return (m_gameInput && m_keys[key]) || m_injected[key];
+}
+bool Input::IsKeyPressed(int key) const {
+    if (key < 0 || key >= kMaxKeys) return false;
+    return ((m_gameInput && m_keys[key]) || m_injected[key]) && !(m_prevKeys[key] || m_prevInjected[key]);
+}
 bool Input::IsKeyReleased(int key) const {
     if (!m_gameInput || key < 0 || key >= kMaxKeys) return false;
     return !(m_keys[key] || m_injected[key]) && (m_prevKeys[key] || m_prevInjected[key]);

@@ -15,7 +15,7 @@ void GlfwErrorCallback(int code, const char* description) {
 
 Window::~Window() { Destroy(); }
 
-bool Window::Create(const std::string& title, int width, int height, bool vsync) {
+bool Window::Create(const std::string& title, int width, int height, bool vsync, bool takeFocus) {
     glfwSetErrorCallback(GlfwErrorCallback);
     if (!glfwInit()) {
         Log::Error("glfwInit failed");
@@ -31,6 +31,8 @@ bool Window::Create(const std::string& title, int width, int height, bool vsync)
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
         glfwWindowHint(GLFW_SAMPLES, 4);
+        glfwWindowHint(GLFW_FOCUSED, takeFocus ? GLFW_TRUE : GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUS_ON_SHOW, takeFocus ? GLFW_TRUE : GLFW_FALSE);
 #ifndef NDEBUG
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 #endif

@@ -47,7 +47,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Runtime flags
 
-`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
+`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus or keyboard, for automated runs), `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
 the real C++ -> C# -> Jolt path), `--quit-after <seconds>`, `--screenshot <file.bmp>`.
 
 Automated smoke test:
@@ -91,25 +91,26 @@ render: cull -> shadow pass -> PBR pass -> sky -> debug lines -> ImGui -> swap
 
 ### Path tracer
 
-`Renderer` hands its draw list to `PathTracer` (`src/raytracing/`). Each frame goes through these steps:
+`Renderer` hands its draw list to `PathTracer` (`src/raytracing/`). Each frame runs 12 compute passes on a headless
+Vulkan device, then hands the image to OpenGL:
 
-1. **TLAS rebuild** over per-mesh BLASes, with one instance per draw command. Material data goes in a parallel buffer.
-2. **`pathtrace.comp`**: ray queries (`VK_KHR_ray_query`) trace up to N bounces. Diffuse is Lambert and specular is GGX
-   (sampled from the visible normal distribution, VNDF). The sun is a finite-size disc sampled directly at every
-   bounce (next-event estimation), which gives soft shadows. The sky acts as an environment light, emissive surfaces
-   emit light, and Russian roulette plus a firefly clamp keep noise in check. Output is noise-free albedo/emission
-   plus the lighting with albedo divided out (demodulated), which is easier to denoise.
-3. **`temporal.comp`**: reprojects last frame's history and validates it with position/normal checks. While the camera
-   and scene are still (within `staticTolerance`), accumulation is unbounded and converges to the reference image.
-4. **`atrous.comp`** (×5): 3×3 edge-aware à-trous wavelet filter, guided by normals, depth and the variance of each
-   pixel's brightness.
-5. **`composite.comp`**: multiplies the albedo back in, adds emission and fog, then ACES tonemapping. The result goes
-   to an OpenGL texture.
+| Stage | What it does |
+| --- | --- |
+| `atmo_*.comp` | Physically based atmosphere (Hillaire 2020): Rayleigh and Mie (aerosol) scattering plus ozone absorption, with Earth's shadow, ground bounce and multiple scattering. Builds lookup tables for transmittance, multiple scattering and the sky view (the sky view is rebuilt every frame, so time of day changes instantly). |
+| TLAS build | Rebuilds the top-level acceleration structure from one instance per draw command, over a bottom-level structure per mesh. Glass instances are non-opaque. |
+| `pathtrace.comp` | Traces paths with ray queries on the RT cores. Materials: GGX with visible-normal sampling, multiple-scattering energy compensation, Lambert diffuse, a clearcoat layer, and thin-walled glass with tinted shadows. Lights: sun (atmosphere transmittance, real 0.53° disc), sky and every emissive surface, all sampled directly at each bounce and combined with BSDF sampling through multiple importance sampling (power heuristic). Thin-lens depth of field. |
+| `temporal.comp` / `atrous.comp` | SVGF-style denoiser: reprojection, unbounded accumulation while still, spatial variance for new pixels, and a gradient-aware edge-stopping à-trous filter. |
+| `composite.comp` | Multiplies the albedo back in, adds emission and physically based aerial perspective (haze), and removes single-pixel speckles. |
+| `histogram.comp` / `exposure.comp` | Auto exposure: a luminance histogram drives EV100 metering with eye adaptation, calibrated to 18% middle grey. |
+| `bloom_*.comp` / `tonemap.comp` | Lens bloom (13-tap down / tent up), the ACES filmic curve and sRGB output. |
 
-The CPU never blocks on the GPU. Two frames are kept in flight, and the screen shows the newest finished frame.
-On an RTX 4070 Ti SUPER the testbed (about 740 instances) traces at 1600×900 in about 2.5 ms of GPU time.
-All settings are live in the **Path Tracer** panel. Shaders are compiled to SPIR-V at build time by glslang into
-`bin/<Config>/shaders/`.
+Units are physical. Radiance maps to luminance at 1 unit = 25,000 cd/m², so a sunny scene meters at EV100 ≈ 15 and a
+lamp-lit street at night at ≈ 6. The **Path Tracer** panel exposes time of day (sun elevation and azimuth with presets),
+the atmosphere (air density, haze, ozone, ground albedo, altitude), the camera (auto/manual EV, compensation, bloom,
+f-stop depth of field) and the denoiser. Materials support `clearcoat`, `transmission` and `ior`, including in sector JSON.
+
+The CPU never blocks on the GPU: two frames are kept in flight, and the screen shows the newest finished frame.
+On an RTX 4070 Ti SUPER the testbed (about 780 instances and 100+ lights) traces at 1600×900 in about 2.5 ms of GPU time.
 
 ### C++ <-> C# interop
 

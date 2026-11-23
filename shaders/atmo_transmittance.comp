@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// Copyright (C) 2026 Maxdemyd0 and MAGE contributors
+// Atmosphere transmittance LUT: optical depth to the top of the atmosphere per (height, zenith).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "atmosphere.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= TRANSMITTANCE_LUT_SIZE.x || px.y >= TRANSMITTANCE_LUT_SIZE.y) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(TRANSMITTANCE_LUT_SIZE);
+    float viewHeight, viewZenithCos;
+    UvToTransmittanceParams(uv, viewHeight, viewZenithCos);
+    vec3 ro = vec3(0.0, viewHeight, 0.0);
+    vec3 rd = vec3(0.0, viewZenithCos, sqrt(max(0.0, 1.0 - viewZenithCos * viewZenithCos)));
+
+    float tTop = RaySphere(ro, rd, TopRadius());
+    vec3 opticalDepth = vec3(0.0);
+    const int STEPS = 40;
+    float dt = max(tTop, 0.0) / float(STEPS);
+    for (int i = 0; i < STEPS; ++i) {
+        vec3 p = ro + rd * ((float(i) + 0.5) * dt);
+        opticalDepth += SampleMedium(p).extinction * dt;
+    }
+    imageStore(lutImage[0], px, vec4(exp(-opticalDepth), 1.0));
+}
