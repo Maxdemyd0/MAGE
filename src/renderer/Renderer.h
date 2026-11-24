@@ -18,26 +18,13 @@
 #include <glm/glm.hpp>
 
 #include "core/Camera.h"
+#include "renderer/Material.h"
 #include "renderer/Mesh.h"
+#include "renderer/Texture.h"
 #include "renderer/Shader.h"
 #include "raytracing/PathTracer.h"
 
 namespace mage {
-
-// Physically based material (metallic/roughness). Emissive is radiance in path tracer units
-// (1 unit ~ 25 000 cd/m^2). Clearcoat and transmission are honoured by the path tracer;
-// the raster fallback renders transmissive surfaces as opaque.
-struct Material {
-    glm::vec3 albedo{0.8f};
-    float metallic = 0.0f;
-    float roughness = 0.6f;
-    float checkerScale = 0.0f;
-    glm::vec3 emissive{0.0f};
-    float clearcoat = 0.0f;            // 0..1 strength of a glossy dielectric coat (car paint)
-    float clearcoatRoughness = 0.05f;
-    float transmission = 0.0f;         // 0..1 thin-walled glass (albedo = tint)
-    float ior = 1.5f;
-};
 
 struct DrawCommand {
     MeshHandle mesh = InvalidMesh;
@@ -89,6 +76,7 @@ public:
     void Shutdown();
 
     MeshLibrary& Meshes() { return m_meshes; }
+    TextureLibrary& Textures() { return m_textures; }
 
     void BeginFrame(const Camera& camera, int width, int height);
     void Submit(const DrawCommand& command);
@@ -124,6 +112,7 @@ private:
     void DrawLines();
 
     MeshLibrary m_meshes;
+    TextureLibrary m_textures;
     Shader m_pbrShader;
     Shader m_shadowShader;
     Shader m_skyShader;

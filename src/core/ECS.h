@@ -57,6 +57,17 @@ struct MeshComponent {
     float clearcoatRoughness = 0.05f;
     float transmission = 0.0f;         // thin-walled glass (albedo = tint)
     float ior = 1.5f;
+    uint32_t baseColorTexture = 0;     // TextureHandles, 0 = none
+    uint32_t metallicRoughnessTexture = 0;
+    uint32_t normalTexture = 0;
+    uint32_t emissiveTexture = 0;
+    bool visible = true;
+    bool castShadows = true;
+};
+
+// An imported model (all its parts, with their own materials).
+struct ModelComponent {
+    uint32_t model = 0xFFFFFFFFu;    // AssetManager ModelHandle
     bool visible = true;
     bool castShadows = true;
 };

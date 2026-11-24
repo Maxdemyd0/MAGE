@@ -85,7 +85,8 @@ bool Context::Init(std::string& error) {
         VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &as};
         VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v12};
         vkGetPhysicalDeviceFeatures2(pd, &f2);
-        if (!rq.rayQuery || !as.accelerationStructure || !v12.bufferDeviceAddress ||
+        if (!rq.rayQuery || !as.accelerationStructure || !v12.bufferDeviceAddress || !v12.shaderSampledImageArrayNonUniformIndexing ||
+            props.limits.maxPerStageDescriptorSamplers < 1100 || props.limits.maxPerStageDescriptorSampledImages < 1100 ||
             !f2.features.shaderStorageImageArrayDynamicIndexing || !f2.features.shaderSampledImageArrayDynamicIndexing)
             continue;
 
@@ -125,6 +126,7 @@ bool Context::Init(std::string& error) {
     as.accelerationStructure = VK_TRUE;
     VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &as};
     v12.bufferDeviceAddress = VK_TRUE;
+    v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v12};
     f2.features.shaderStorageImageArrayDynamicIndexing = VK_TRUE;
     f2.features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
@@ -218,6 +220,33 @@ Buffer Context::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Memory
 void Context::DestroyBuffer(Buffer& b) {
     if (b.buffer) vmaDestroyBuffer(allocator, b.buffer, b.allocation);
     b = Buffer{};
+}
+
+Image Context::CreateTexture(uint32_t width, uint32_t height, uint32_t mips, VkFormat format) {
+    Image img;
+    img.format = format;
+    VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = format;
+    ici.extent = {width, height, 1};
+    ici.mipLevels = mips;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (vmaCreateImage(allocator, &ici, &aci, &img.image, &img.allocation, nullptr) != VK_SUCCESS) {
+        Log::Error("Vulkan texture allocation failed ({}x{})", width, height);
+        return Image{};
+    }
+    VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vci.image = img.image;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+    vkCreateImageView(device, &vci, nullptr, &img.view);
+    return img;
 }
 
 Image Context::CreateImage(uint32_t width, uint32_t height, VkFormat format) {

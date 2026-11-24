@@ -15,6 +15,8 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -255,7 +257,38 @@ BodyHandle PhysicsWorld::CreateBody(const BodyDesc& desc) {
         case ShapeType::Capsule:
             shape = new JPH::CapsuleShape(std::max(desc.halfExtents.y, 0.01f), std::max(desc.halfExtents.x, 0.01f));
             break;
+        default: break; // ConvexHull / Mesh below
     }
+
+    if (desc.shape == ShapeType::Mesh && desc.motion == MotionType::Static) {
+        JPH::VertexList vertices;
+        JPH::IndexedTriangleList triangles;
+        for (const glm::vec3& p : desc.points) vertices.push_back(JPH::Float3(p.x, p.y, p.z));
+        for (size_t i = 0; i + 2 < desc.triangles.size(); i += 3)
+            if (std::max({desc.triangles[i], desc.triangles[i + 1], desc.triangles[i + 2]}) < desc.points.size())
+                triangles.push_back(JPH::IndexedTriangle(desc.triangles[i], desc.triangles[i + 1], desc.triangles[i + 2], 0));
+        JPH::MeshShapeSettings ms(std::move(vertices), std::move(triangles));
+        ms.Sanitize();
+        const auto result = ms.Create();
+        if (result.IsValid()) shape = result.Get();
+        else Log::Error("Mesh collision failed: {}", result.HasError() ? result.GetError().c_str() : "no triangles");
+    } else if (desc.shape == ShapeType::ConvexHull || desc.shape == ShapeType::Mesh) {
+        // Moving bodies use the convex hull of the model; degenerate (flat) models use their box.
+        JPH::Array<JPH::Vec3> points;
+        for (const glm::vec3& p : desc.points) points.push_back(ToJolt(p));
+        auto result = JPH::ConvexHullShapeSettings(points).Create();
+        if (!result.IsValid() && !desc.points.empty()) {
+            glm::vec3 mn = desc.points[0], mx = desc.points[0];
+            for (const glm::vec3& p : desc.points) { mn = glm::min(mn, p); mx = glm::max(mx, p); }
+            mx = glm::max(mx, mn + 0.05f);
+            points.clear();
+            for (int i = 0; i < 8; ++i) points.push_back(JPH::Vec3(i & 1 ? mx.x : mn.x, i & 2 ? mx.y : mn.y, i & 4 ? mx.z : mn.z));
+            result = JPH::ConvexHullShapeSettings(points).Create();
+        }
+        if (result.IsValid()) shape = result.Get();
+        else Log::Error("Convex collision failed: {}", result.HasError() ? result.GetError().c_str() : "no points");
+    }
+    if (!shape) return InvalidBody;
 
     JPH::EMotionType motion = JPH::EMotionType::Static;
     if (desc.motion == MotionType::Dynamic) motion = JPH::EMotionType::Dynamic;

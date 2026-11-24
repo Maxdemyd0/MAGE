@@ -11,7 +11,7 @@
 
 namespace mage::interop {
 
-inline constexpr uint32_t kInteropVersion = 1;
+inline constexpr uint32_t kInteropVersion = 2;
 
 struct NVec3 { float x, y, z; };
 struct NQuat { float x, y, z, w; };
@@ -46,6 +46,14 @@ using FnIsKeyDown          = int32_t (*)(int32_t key);
 using FnIsKeyPressed       = int32_t (*)(int32_t key);
 using FnEntityExists       = int32_t (*)(uint32_t entity);
 
+using FnSpawnModel         = uint32_t (*)(const char* utf8Path, const NVec3* position, const NQuat* rotation, const NVec3* scale,
+                                          int32_t physics); // 0 none, 1 static, 2 dynamic
+using FnSetEntityTexture   = int32_t (*)(uint32_t entity, int32_t slot, const char* utf8Path); // base, metal-rough, normal, emissive
+using FnPlayAudio          = uint32_t (*)(const char* utf8Path, float volume, float pitch, int32_t loop, const NVec3* position);
+using FnStopAudio          = void (*)(uint32_t sound);
+using FnLoadFont           = int32_t (*)(const char* utf8Path, float size);
+using FnDrawLabel          = void (*)(const char* utf8Text, float x, float y, float size, uint32_t rgba, int32_t font);
+
 struct NativeBindings {
     uint32_t structSize;
     uint32_t version;
@@ -60,6 +68,12 @@ struct NativeBindings {
     FnIsKeyDown IsKeyDown;
     FnIsKeyPressed IsKeyPressed;
     FnEntityExists EntityExists;
+    FnSpawnModel SpawnModel;
+    FnSetEntityTexture SetEntityTexture;
+    FnPlayAudio PlayAudio;
+    FnStopAudio StopAudio;
+    FnLoadFont LoadFont;
+    FnDrawLabel DrawLabel;
 };
 
 // ---- Managed entry points filled in by C# ScriptEngine.Initialize ----
@@ -78,7 +92,7 @@ static_assert(sizeof(NVec3) == 12);
 static_assert(sizeof(NQuat) == 16);
 static_assert(sizeof(NRaycastHit) == 32);
 static_assert(sizeof(NVehicleState) == 20);
-static_assert(sizeof(NativeBindings) == 8 + 11 * sizeof(void*));
+static_assert(sizeof(NativeBindings) == 8 + 17 * sizeof(void*));
 static_assert(sizeof(ManagedCallbacks) == 5 * sizeof(void*));
 
 } // namespace mage::interop

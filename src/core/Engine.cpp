@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "core/Engine.h"
+#include "assets/AssetManager.h"
+#include "audio/AudioEngine.h"
 #include "core/Log.h"
 #include "core/Window.h"
 #include "physics/PhysicsWorld.h"
@@ -18,11 +20,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <format>
 #include <fstream>
 #include <thread>
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <timeapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #else
@@ -83,6 +88,11 @@ bool Engine::Init(const EngineConfig& config) {
     const std::filesystem::path exeDir = ExecutableDirectory();
     std::error_code ec;
     if (!config.assetDirectory.empty()) m_assetDirectory = config.assetDirectory;
+#ifdef MAGE_SOURCE_DIR
+    // The editor works on the project's own assets, not on the copy next to the executable.
+    else if (config.editorMode && std::filesystem::exists(std::filesystem::path(MAGE_SOURCE_DIR) / "assets", ec))
+        m_assetDirectory = std::filesystem::path(MAGE_SOURCE_DIR) / "assets";
+#endif
     else if (std::filesystem::exists(exeDir / "assets", ec)) m_assetDirectory = exeDir / "assets";
 #ifdef MAGE_SOURCE_DIR
     else m_assetDirectory = std::filesystem::path(MAGE_SOURCE_DIR) / "assets";
@@ -119,6 +129,14 @@ bool Engine::Init(const EngineConfig& config) {
     // Physics.
     m_physics = std::make_unique<PhysicsWorld>();
     if (!m_physics->Init()) return false;
+
+#ifdef _WIN32
+    timeBeginPeriod(1); // default is 15.6 ms, which makes the frame cap overshoot
+#endif
+    m_assets = std::make_unique<AssetManager>();
+    m_assets->Init(m_renderer.get(), m_assetDirectory);
+    m_audio = std::make_unique<AudioEngine>();
+    m_audio->Init(config.background); // automated runs stay silent
 
     // Scripting (optional: the engine keeps running without it).
     m_scripts = std::make_unique<ScriptHost>();
@@ -170,6 +188,7 @@ void Engine::InitImGui() {
     style.Colors[ImGuiCol_CheckMark] = ImVec4(0.95f, 0.45f, 0.30f, 1.00f);
     style.ScaleAllSizes(scale);
 
+    if (m_config.background) io.ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoKeyboard;
     ImGui_ImplGlfw_InitForOpenGL(m_window->Handle(), true);
     ImGui_ImplOpenGL3_Init("#version 410 core");
     m_imguiInitialized = true;
@@ -197,12 +216,19 @@ void Engine::Shutdown() {
     m_sectorEntities.clear();
 
     if (m_scripts) m_scripts->Shutdown();
+#ifdef _WIN32
+    if (m_assets) timeEndPeriod(1);
+#endif
+    if (m_audio) m_audio->Shutdown();
     if (m_physics) m_physics->Shutdown();
     ShutdownImGui();
     if (m_renderer) m_renderer->Shutdown();
     m_renderer.reset();
     if (m_window) m_window->Destroy();
 
+    m_assets.reset();
+    m_audio.reset();
+    m_fonts.clear();
     m_streamer.reset();
     m_physics.reset();
     m_scripts.reset();
@@ -279,9 +305,12 @@ void Engine::Run() {
             m_streamer->Update(focus);
         }
         FlushDestroyQueue();
+        m_audio->Update(m_camera.position, m_camera.Forward());
+        if (auto dropped = m_window->TakeDroppedFiles(); !dropped.empty() && OnFilesDropped) OnFilesDropped(dropped);
 
         // ---- Render --------------------------------------------------------------------
         if (m_window->IsMinimized()) {
+            m_labels.clear();
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
@@ -347,9 +376,18 @@ void Engine::SubmitScene() {
         cmd.mesh = m.mesh;
         cmd.model = t.Matrix();
         cmd.material = Material{m.albedo, m.metallic, m.roughness, m.checkerScale, m.emissive,
-                                m.clearcoat, m.clearcoatRoughness, m.transmission, m.ior};
+                                m.clearcoat, m.clearcoatRoughness, m.transmission, m.ior,
+                                m.baseColorTexture, m.metallicRoughnessTexture, m.normalTexture, m.emissiveTexture};
         cmd.castShadows = m.castShadows;
         r.Submit(cmd);
+    });
+
+    m_registry.Each<ModelComponent, TransformComponent>([&](Entity, ModelComponent& m, TransformComponent& t) {
+        const Model* model = m.visible ? m_assets->GetModel(m.model) : nullptr;
+        if (!model) return;
+        const glm::mat4 world = t.Matrix();
+        for (const Model::Part& part : model->parts)
+            r.Submit(DrawCommand{part.mesh, world * part.transform, part.material, m.castShadows});
     });
 
     // Vehicles: wheels (from the Jolt suspension state) + a cabin on top of the chassis.
@@ -440,10 +478,12 @@ void Engine::RenderFrame() {
             glClearColor(0.08f, 0.08f, 0.09f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
+        BuildPendingFonts();
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
         if (OnImGui) OnImGui();
+        DrawLabels();
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     }
@@ -453,6 +493,59 @@ void Engine::RenderFrame() {
     if (!m_screenshotPath.empty()) WriteScreenshot(fbWidth, fbHeight);
 
     m_window->SwapBuffers();
+}
+
+// ============================================================================ Fonts & text
+int Engine::LoadFont(const std::string& path, float size) {
+    size = std::clamp(size, 4.0f, 256.0f);
+    const std::filesystem::path file = m_assets->Resolve(path);
+    const std::string key = std::format("{}@{:.1f}", PathToUtf8(file), size);
+    for (size_t i = 0; i < m_fonts.size(); ++i)
+        if (m_fonts[i].key == key) return static_cast<int>(i) + 1;
+    std::string error;
+    if (!ValidateFont(file, error)) {
+        Log::Error("Font '{}': {}", path, error);
+        return 0;
+    }
+    m_fonts.push_back({key, file, size, nullptr});
+    m_fontsDirty = true;
+    return static_cast<int>(m_fonts.size());
+}
+
+void Engine::DrawLabel(const std::string& text, const glm::vec2& position, float size, const glm::vec4& color, int font) {
+    m_labels.push_back({text, position, size, color, font});
+}
+
+void Engine::BuildPendingFonts() { // must run outside an ImGui frame
+    if (!m_fontsDirty) return;
+    m_fontsDirty = false;
+    // Latin, Greek, Cyrillic and general punctuation.
+    static const ImWchar ranges[] = {0x0020, 0x024F, 0x0370, 0x03FF, 0x0400, 0x052F, 0x2010, 0x205E, 0x20A0, 0x20BF, 0};
+    ImGuiIO& io = ImGui::GetIO();
+    for (FontEntry& f : m_fonts) {
+        if (f.font) continue;
+        std::vector<uint8_t> bytes;
+        if (!ReadFileBytes(f.file, bytes) || bytes.empty()) continue;
+        void* copy = ImGui::MemAlloc(bytes.size()); // the atlas owns and frees this
+        std::memcpy(copy, bytes.data(), bytes.size());
+        f.font = io.Fonts->AddFontFromMemoryTTF(copy, static_cast<int>(bytes.size()), f.size, nullptr, ranges);
+    }
+    ImGui_ImplOpenGL3_DestroyFontsTexture();
+    if (!io.Fonts->Build() || !ImGui_ImplOpenGL3_CreateFontsTexture()) Log::Error("Font atlas could not be built");
+}
+
+void Engine::DrawLabels() {
+    if (m_labels.empty()) return;
+    ImDrawList* dl = m_config.editorMode ? ImGui::GetForegroundDrawList() : ImGui::GetBackgroundDrawList();
+    const ImVec2 o = m_config.editorMode ? ImVec2(m_viewportOrigin.x, m_viewportOrigin.y) : ImGui::GetMainViewport()->Pos;
+    if (m_config.editorMode) dl->PushClipRect(o, ImVec2(o.x + static_cast<float>(m_viewportWidth), o.y + static_cast<float>(m_viewportHeight)), true);
+    for (const Label& l : m_labels) {
+        auto* font = l.font > 0 && l.font <= static_cast<int>(m_fonts.size()) ? static_cast<ImFont*>(m_fonts[static_cast<size_t>(l.font) - 1].font) : nullptr;
+        dl->AddText(font ? font : ImGui::GetFont(), l.size, ImVec2(o.x + l.position.x, o.y + l.position.y),
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(l.color.r, l.color.g, l.color.b, l.color.a)), l.text.c_str());
+    }
+    if (m_config.editorMode) dl->PopClipRect();
+    m_labels.clear();
 }
 
 void Engine::WriteScreenshot(int width, int height) {
@@ -519,12 +612,24 @@ void Engine::DestroyEntityNow(Entity e) {
 }
 
 Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
+    ModelHandle modelHandle = InvalidModel;
+    if (!d.model.empty()) {
+        modelHandle = m_assets->LoadModel(d.model);
+        if (modelHandle == InvalidModel) return NullEntity;
+    }
+    const Model* model = m_assets->GetModel(modelHandle);
+
     const Entity e = CreateEntity(d.name);
     auto& t = m_registry.Add<TransformComponent>(e);
     t.position = d.position;
     t.rotation = glm::normalize(d.rotation);
     t.scale = d.scale;
 
+    if (model) {
+        auto& mc = m_registry.Add<ModelComponent>(e);
+        mc.model = modelHandle;
+        mc.castShadows = d.castShadows;
+    } else {
     auto& m = m_registry.Add<MeshComponent>(e);
     m.mesh = m_renderer->Meshes().Find(d.mesh);
     if (m.mesh == InvalidMesh) m.mesh = m_renderer->Meshes().Find("cube");
@@ -538,12 +643,19 @@ Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
     m.transmission = d.transmission;
     m.ior = d.ior;
     m.castShadows = d.castShadows;
+    if (!d.texture.empty()) m.baseColorTexture = m_assets->LoadTexture(d.texture);
+    }
 
     if (d.physics != SpawnPhysics::None) {
         BodyDesc b;
         b.shape = ShapeForMesh(d.mesh);
         const glm::vec3 s = glm::abs(d.scale);
-        if (b.shape == ShapeType::Sphere) b.halfExtents = glm::vec3(std::max({s.x, s.y, s.z}) * 0.5f);
+        if (model) {
+            b.shape = d.physics == SpawnPhysics::Static ? ShapeType::Mesh : ShapeType::ConvexHull;
+            b.points.reserve(model->collisionVertices.size());
+            for (const glm::vec3& p : model->collisionVertices) b.points.push_back(p * d.scale);
+            if (b.shape == ShapeType::Mesh) b.triangles = model->collisionIndices;
+        } else if (b.shape == ShapeType::Sphere) b.halfExtents = glm::vec3(std::max({s.x, s.y, s.z}) * 0.5f);
         else if (b.shape == ShapeType::Cylinder) b.halfExtents = glm::vec3(std::max(s.x, s.z) * 0.5f, s.y * 0.5f, 0.0f);
         else b.halfExtents = s * 0.5f;
         b.position = t.position;
@@ -653,11 +765,14 @@ void Engine::OnSectorLoaded(const SectorData& data) {
         s.clearcoat = d.clearcoat;
         s.transmission = d.transmission;
         s.ior = d.ior;
+        s.model = d.model;
+        s.texture = d.texture;
         s.mass = d.mass;
         s.physics = d.physics == SectorPhysics::Dynamic ? SpawnPhysics::Dynamic
                   : d.physics == SectorPhysics::Static  ? SpawnPhysics::Static
                                                         : SpawnPhysics::None;
         const Entity e = SpawnPrimitive(s);
+        if (e == NullEntity) continue;
         m_registry.Add<SectorComponent>(e, SectorComponent{data.coord.x, data.coord.z});
         list.push_back(e);
     }

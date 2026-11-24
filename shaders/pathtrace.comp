@@ -34,6 +34,26 @@ struct SurfaceHit {
 
 vec3 VertexPosition(uint i) { return vec3(vertices[i * 8u + 0u], vertices[i * 8u + 1u], vertices[i * 8u + 2u]); }
 vec3 VertexNormal(uint i) { return vec3(vertices[i * 8u + 3u], vertices[i * 8u + 4u], vertices[i * 8u + 5u]); }
+vec2 VertexUV(uint i) { return vec2(vertices[i * 8u + 6u], vertices[i * 8u + 7u]); }
+vec4 SampleTexture(uint id, vec2 uv, float lod) { return textureLod(materialTex[nonuniformEXT(id)], uv, lod); }
+float TextureLod(uint id, float baseLod) {
+    vec2 size = vec2(textureSize(materialTex[nonuniformEXT(id)], 0));
+    return max(baseLod + 0.5 * log2(size.x * size.y), 0.0);
+}
+vec2 InterpolateUV(Instance inst, uint prim, vec2 bary) {
+    uvec4 mesh = meshes[inst.ids.x];
+    uint base = mesh.x + prim * 3u;
+    return VertexUV(indices[base] + mesh.y) * (1.0 - bary.x - bary.y) + VertexUV(indices[base + 1u] + mesh.y) * bary.x +
+           VertexUV(indices[base + 2u] + mesh.y) * bary.y;
+}
+// Cut-out materials: is this point of the triangle solid?
+bool AlphaPass(Instance inst, uint prim, vec2 bary) {
+    if ((inst.ids.z & INSTANCE_MASKED) == 0u) return true;
+    float a = inst.surface.y;
+    if (inst.textures.x != 0u) a *= SampleTexture(inst.textures.x, InterpolateUV(inst, prim, bary), 0.0).a;
+    return a >= inst.surface.z;
+}
+
 vec3 ToWorld(Instance inst, vec3 p) {
     vec4 h = vec4(p, 1.0);
     return vec3(dot(inst.row0, h), dot(inst.row1, h), dot(inst.row2, h));
@@ -51,8 +71,10 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, 0xFF, origin, 1e-3, dir, 1e5);
     while (rayQueryProceedEXT(rq)) {
-        // Non-opaque candidates are glass: for primary/bounce rays they are real surfaces.
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
+        // Non-opaque candidates are glass (a real surface for these rays) or cut-out materials.
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        Instance ci = instances[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)];
+        if (AlphaPass(ci, uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)), rayQueryGetIntersectionBarycentricsEXT(rq, false)))
             rayQueryConfirmIntersectionEXT(rq);
     }
     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
@@ -90,6 +112,38 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     hit.clearcoatRoughness = clamp(inst.layer.z, 0.02, 1.0);
     hit.transmission = inst.layer.w;
     hit.ior = max(inst.misc.x, 1.0);
+    if (any(notEqual(inst.textures, uvec4(0u)))) {
+        vec2 uv0 = VertexUV(i0), uv1 = VertexUV(i1), uv2 = VertexUV(i2);
+        vec2 uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
+        vec3 a, b, c;
+        TriangleWorld(inst, prim, a, b, c);
+        vec3 e1 = b - a, e2 = c - a;
+        vec2 d1 = uv1 - uv0, d2 = uv2 - uv0;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        // Mip level from the pixel footprint (ray cone) and the triangle's texel density.
+        float worldArea = max(length(cross(e1, e2)), 1e-12);
+        float footprint = hit.t * uintBitsToFloat(ubo.counts.w) / max(abs(dot(ng, dir)), 0.1);
+        float lod = 0.5 * log2(max(abs(det), 1e-12) / worldArea) + log2(max(footprint, 1e-9));
+        if (inst.textures.x != 0u) hit.albedo *= SampleTexture(inst.textures.x, uv, TextureLod(inst.textures.x, lod)).rgb;
+        if (inst.textures.y != 0u) {
+            vec3 mr = SampleTexture(inst.textures.y, uv, TextureLod(inst.textures.y, lod)).rgb;
+            hit.roughness = clamp(hit.roughness * mr.g, 0.02, 1.0);
+            hit.metallic *= mr.b;
+        }
+        if (inst.textures.w != 0u) hit.emission *= SampleTexture(inst.textures.w, uv, 0.0).rgb;
+        if (inst.textures.z != 0u && abs(det) > 1e-12) {
+            vec3 nm = SampleTexture(inst.textures.z, uv, TextureLod(inst.textures.z, lod)).xyz * 2.0 - 1.0;
+            vec3 T = (e1 * d2.y - e2 * d1.y) / det, B = (e2 * d1.x - e1 * d2.x) / det;
+            T -= hit.normal * dot(hit.normal, T);
+            B -= hit.normal * dot(hit.normal, B);
+            float tl = length(T), bl = length(B);
+            if (tl > 1e-9 && bl > 1e-9) // glTF: green points towards decreasing V
+                hit.normal = normalize(T / tl * nm.x * inst.surface.x - B / bl * nm.y * inst.surface.x + hit.normal * max(nm.z, 1e-3));
+            // A bent normal must not face away from the viewer, or the surface turns black.
+            float nv = dot(hit.normal, -dir);
+            if (nv < 0.02) hit.normal = normalize(hit.normal - dir * (0.02 - nv));
+        }
+    }
     hit.lightPdfArea = 0.0;
     if (inst.misc.y > 0.0) {
         vec3 a, b, c;
@@ -116,7 +170,9 @@ vec3 Transmittance(vec3 origin, vec3 dir, float tMax) {
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
         Instance inst = instances[rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)];
+        if (!AlphaPass(inst, uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, false)), rayQueryGetIntersectionBarycentricsEXT(rq, false))) continue;
         float tr = inst.layer.w;
+        if (tr <= 0.0) { rayQueryTerminateEXT(rq); return vec3(0.0); } // solid part of a cut-out
         vis *= mix(vec3(1.0), inst.albedoMetallic.rgb, tr) * tr * 0.92; // ~8% Fresnel loss per pane
         if (max(vis.r, max(vis.g, vis.b)) < 1e-3) { rayQueryTerminateEXT(rq); return vec3(0.0); }
     }
@@ -316,7 +372,9 @@ vec3 SampleEmitters(SurfaceHit h, vec3 V, vec3 origin, inout uint rng) {
     vec3 vis = Transmittance(origin, L, dist * 0.999);
     if (max(vis.r, max(vis.g, vis.b)) <= 0.0) return vec3(0.0);
     float w = PowerHeuristic(pdfLight, PdfBSDF(h, V, L));
-    return f * NdotL * inst.emissionRoughness.rgb * vis * w / pdfLight;
+    vec3 emitted = inst.emissionRoughness.rgb;
+    if (inst.textures.w != 0u) emitted *= SampleTexture(inst.textures.w, InterpolateUV(inst, tri, vec2(su * (1.0 - v), su * v)), 0.0).rgb;
+    return f * NdotL * emitted * vis * w / pdfLight;
 }
 
 vec3 ClampLum(vec3 c, float maxLum) {

@@ -5,6 +5,7 @@
 // !!! Binding layout and the Frame/Instance/Light structs mirror src/raytracing/PathTracer.cpp !!!
 
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 const float PI = 3.14159265359;
 
@@ -21,11 +22,14 @@ struct Instance {
     vec4 misc;              // x ior, y light selection probability (0 = not a light), zw -
     uvec4 ids;              // x mesh index, y triangle count, z flags (1 transmissive, 2 emissive)
     vec4 row0, row1, row2;  // object -> world (rows of the 3x4 matrix)
+    uvec4 textures;         // base color, metallic-roughness, normal, emissive (0 = none)
+    vec4 surface;           // x normal scale, y alpha, z alpha cutoff
 };
 layout(std430, set = 0, binding = 4) readonly buffer Instances { Instance instances[]; };
 
 const uint INSTANCE_TRANSMISSIVE = 1u;
 const uint INSTANCE_EMISSIVE = 2u;
+const uint INSTANCE_MASKED = 4u;
 
 layout(std140, set = 0, binding = 5) uniform Frame {
     mat4 invViewProj;
@@ -43,7 +47,7 @@ layout(std140, set = 0, binding = 5) uniform Frame {
     uvec4 params0;       // x frame index, y max bounces, z samples per pixel, w flags
     vec4 params1;        // x luminance scale, y max history, z color sigma, w moving min alpha
     uvec4 size;          // x width, y height, z instance count, w atrous iterations
-    uvec4 counts;        // x light count, y bloom levels, z camera flags, w -
+    uvec4 counts;        // x light count, y bloom levels, z camera flags, w pixel spread angle (float bits)
 } ubo;
 
 const uint FLAG_STATIC = 1u;
@@ -82,6 +86,8 @@ layout(set = 0, binding = 20, rgba16f) uniform image2D lutImage[3];   // 0 trans
 layout(set = 0, binding = 21) uniform sampler2D lutTex[3];
 layout(set = 0, binding = 22, rgba16f) uniform image2D bloomImage[6];
 layout(set = 0, binding = 23) uniform sampler2D bloomTex[6];
+
+layout(set = 0, binding = 24) uniform sampler2D materialTex[1024];
 
 layout(push_constant) uniform Push { ivec4 pass; } pc;
 

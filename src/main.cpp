@@ -13,6 +13,8 @@
 //    --no-scripts         skip .NET (native C++ controller drives the car)
 //    --no-streaming       disable the sector streamer
 //    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
+//    --load-model <file>  spawn an imported model next to the car
+//    --font <file>        draw a line of text with a font file
 //    --background         do not take window focus; ignore the real keyboard (automated runs)
 //    --sun-elevation <d>  time of day as sun elevation in degrees (-18 night .. 90 noon)
 //    --autodrive          demo autopilot: injects W/D key presses (exercises C++ -> C# -> Jolt)
@@ -40,6 +42,7 @@ int main(int argc, char** argv) {
     double quitAfterSeconds = 0.0;
     float sunElevation = -1000.0f; // --sun-elevation <deg>: time of day for tests / screenshots
     bool autodrive = false;
+    std::string loadModel, fontPath; // --load-model <file>, --font <file>: preview imported assets
     std::string screenshotPath;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -50,6 +53,8 @@ int main(int argc, char** argv) {
         else if (arg == "--max-fps" && i + 1 < argc) config.maxFps = std::atoi(argv[++i]);
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
+        else if (arg == "--load-model" && i + 1 < argc) loadModel = argv[++i];
+        else if (arg == "--font" && i + 1 < argc) fontPath = argv[++i];
         else if (arg == "--raster") config.enablePathTracing = false;
         else if (arg == "--background") config.background = true;
         else if (arg == "--sun-elevation" && i + 1 < argc) sunElevation = static_cast<float>(std::atof(argv[++i]));
@@ -63,6 +68,15 @@ int main(int argc, char** argv) {
 
     mage::Testbed testbed;
     testbed.Build(engine);
+    if (!loadModel.empty()) {
+        mage::SpawnDesc d;
+        d.name = "ImportedModel";
+        d.model = loadModel;
+        d.position = glm::vec3(2.6f, 0.0f, -15.0f);
+        d.physics = mage::SpawnPhysics::Static;
+        if (engine.SpawnPrimitive(d) == mage::NullEntity) mage::Log::Error("--load-model failed");
+    }
+    const int previewFont = fontPath.empty() ? 0 : engine.LoadFont(fontPath, 40.0f);
     if (sunElevation > -90.0f) {
         auto& sun = engine.GetRenderer().lighting.sunDirection;
         const float azimuth = std::atan2(sun.x, sun.z), e = sunElevation * 3.14159265f / 180.0f;
@@ -78,6 +92,7 @@ int main(int argc, char** argv) {
     engine.OnFixedUpdate = [&](float dt) { testbed.FixedUpdate(engine, dt); };
     engine.OnUpdate = [&](float dt) {
         elapsed += dt;
+        if (previewFont) engine.DrawLabel("MAGE font import \xC3\x9C \xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD1\x96\xD1\x82", {430.0f, 20.0f}, 40.0f, {1, 1, 1, 1}, previewFont);
         mage::Input& input = engine.GetInput();
 
         if (autodrive) {

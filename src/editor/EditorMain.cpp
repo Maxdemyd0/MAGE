@@ -6,6 +6,8 @@
 //  Panels: Viewport (scene rendered to texture, click-to-select via physics raycast),
 //  Hierarchy, Inspector, Physics, Vehicle Tuning, Streaming, Renderer, Profiler, Console.
 // =============================================================================
+#include "assets/AssetManager.h"
+#include "audio/AudioEngine.h"
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
@@ -42,9 +44,21 @@ public:
         m_engine.GetInput().SetGameInputEnabled(m_viewportFocused);
         if (m_viewportFocused && m_engine.GetInput().IsKeyPressedRaw(GLFW_KEY_DELETE)) DeleteSelected();
         m_testbed.Update(m_engine, dt, m_viewportHovered);
+        if (m_previewFont) m_engine.DrawLabel("The quick brown fox 0123456789", {20.0f, 40.0f}, 32.0f, {1, 1, 1, 1}, m_previewFont);
 
         m_frameTimes[m_frameTimeOffset] = static_cast<float>(m_engine.GetFrameStats().frameMs);
         m_frameTimeOffset = (m_frameTimeOffset + 1) % m_frameTimes.size();
+    }
+
+    // Files dragged onto the window are copied into the asset folder.
+    void ImportFiles(const std::vector<std::filesystem::path>& files) {
+        for (const auto& f : files) {
+            std::string error;
+            const std::string path = m_engine.GetAssets().Import(f, error);
+            if (path.empty()) Log::Error("Import of '{}' failed: {}", PathToUtf8(f.filename()), error);
+            m_importStatus = path.empty() ? "Failed: " + error : "Imported " + path;
+        }
+        m_assetsDirty = true;
     }
 
     void Draw() {
@@ -66,6 +80,7 @@ public:
         if (m_showPathTracer) m_testbed.DrawPathTracerWindow(m_engine, &m_showPathTracer);
         if (m_showProfiler) DrawProfiler();
         if (m_showConsole) DrawConsole();
+        if (m_showAssets) DrawAssets();
         if (m_showDemo) ImGui::ShowDemoWindow(&m_showDemo);
     }
 
@@ -90,6 +105,7 @@ private:
         ImGui::DockBuilderDockWindow("Vehicle Tuning", rightBottom);
         ImGui::DockBuilderDockWindow("Physics", rightBottom);
         ImGui::DockBuilderDockWindow("Path Tracer", rightBottom);
+        ImGui::DockBuilderDockWindow("Assets", bottom);
         ImGui::DockBuilderDockWindow("Console", bottom);
         ImGui::DockBuilderDockWindow("Profiler", bottom);
         ImGui::DockBuilderDockWindow("Streaming", bottom);
@@ -123,6 +139,7 @@ private:
             ImGui::MenuItem("Path Tracer", nullptr, &m_showPathTracer);
             ImGui::MenuItem("Profiler", nullptr, &m_showProfiler);
             ImGui::MenuItem("Console", nullptr, &m_showConsole);
+            ImGui::MenuItem("Assets", nullptr, &m_showAssets);
             ImGui::Separator();
             ImGui::MenuItem("Physics wireframe", "F1", &m_engine.drawPhysicsDebug);
             bool fly = m_testbed.cameraMode == Testbed::CameraMode::Fly;
@@ -147,6 +164,7 @@ private:
         m_engine.SetViewportSize(static_cast<int>(std::max(avail.x, 1.0f)), static_cast<int>(std::max(avail.y, 1.0f)));
 
         const ImVec2 origin = ImGui::GetCursorScreenPos();
+        m_engine.SetViewportOrigin({origin.x, origin.y});
         if (const uint32_t tex = m_engine.GetViewportTexture())
             ImGui::Image((ImTextureID)(uintptr_t)tex, avail, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
         m_viewportHovered = ImGui::IsItemHovered();
@@ -267,6 +285,17 @@ private:
             ImGui::Checkbox("Visible", &m->visible);
             ImGui::SameLine();
             ImGui::Checkbox("Cast shadows", &m->castShadows);
+        }
+
+        if (auto* mc = reg.TryGet<ModelComponent>(e); mc && ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (const Model* model = m_engine.GetAssets().GetModel(mc->model)) {
+                const glm::vec3 size = model->bounds.max - model->bounds.min;
+                ImGui::Text("%s: %zu parts, %zu triangles", model->name.c_str(), model->parts.size(), model->triangles);
+                ImGui::Text("Size %.2f x %.2f x %.2f m", size.x, size.y, size.z);
+            }
+            ImGui::Checkbox("Visible##model", &mc->visible);
+            ImGui::SameLine();
+            ImGui::Checkbox("Cast shadows##model", &mc->castShadows);
         }
 
         if (rb && ImGui::CollapsingHeader("Rigid Body (Jolt)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -458,6 +487,78 @@ private:
         ImGui::End();
     }
 
+    // ------------------------------------------------------------------ assets
+    void DrawAssets() {
+        // Saved layouts from before this panel existed: join the Console's tab group.
+        if (const ImGuiWindow* console = ImGui::FindWindowByName("Console"); console && console->DockId)
+            ImGui::SetNextWindowDockID(console->DockId, ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Assets", &m_showAssets)) {
+            ImGui::End();
+            return;
+        }
+        AssetManager& assets = m_engine.GetAssets();
+        ImGui::TextDisabled("Drop .gltf .glb .fbx .obj / images / fonts / sounds onto the window, or paste a path:");
+        ImGui::SetNextItemWidth(-160.0f);
+        ImGui::InputText("##importpath", m_importPath, sizeof(m_importPath));
+        ImGui::SameLine();
+        if (ImGui::Button("Import") && m_importPath[0]) ImportFiles({Utf8ToPath(m_importPath)});
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) m_assetsDirty = true;
+        if (!m_importStatus.empty()) ImGui::TextUnformatted(m_importStatus.c_str());
+        if (m_assetsDirty) {
+            m_assetList = assets.List();
+            m_assetsDirty = false;
+        }
+        static const char* kSlots[] = {"Base color", "Metal/rough", "Normal", "Emissive"};
+        ImGui::SetNextItemWidth(130.0f);
+        ImGui::Combo("Texture slot", &m_textureSlot, kSlots, 4);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(130.0f);
+        static const char* kPhysics[] = {"No collision", "Static mesh", "Dynamic hull"};
+        ImGui::Combo("Model physics", &m_modelPhysics, kPhysics, 3);
+        ImGui::Separator();
+        ImGui::BeginChild("##assetlist");
+        for (size_t i = 0; i < m_assetList.size(); ++i) {
+            const AssetManager::Entry& a = m_assetList[i];
+            ImGui::PushID(static_cast<int>(i));
+            const char* action = a.type == AssetType::Model ? "Spawn" : a.type == AssetType::Image ? "Apply" : a.type == AssetType::Sound ? "Play" : "Load";
+            if (ImGui::SmallButton(action)) UseAsset(a);
+            ImGui::SameLine();
+            ImGui::Text("[%s] %s", AssetTypeName(a.type), a.path.c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+        ImGui::End();
+    }
+
+    void UseAsset(const AssetManager::Entry& a) {
+        AssetManager& assets = m_engine.GetAssets();
+        if (a.type == AssetType::Model) {
+            SpawnDesc d;
+            d.name = PathToUtf8(Utf8ToPath(a.path).stem());
+            d.model = a.path;
+            const Camera& cam = m_engine.GetCamera();
+            d.position = cam.position + cam.Forward() * 8.0f;
+            d.physics = m_modelPhysics == 2 ? SpawnPhysics::Dynamic : m_modelPhysics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
+            const Entity e = m_engine.SpawnPrimitive(d);
+            if (e != NullEntity) m_selected = e;
+            else m_importStatus = "Could not load " + a.path + " (see Console)";
+        } else if (a.type == AssetType::Image) {
+            auto* m = m_engine.GetRegistry().TryGet<MeshComponent>(m_selected);
+            if (!m) {
+                m_importStatus = "Select a primitive (not an imported model) to apply a texture";
+                return;
+            }
+            uint32_t* slots[] = {&m->baseColorTexture, &m->metallicRoughnessTexture, &m->normalTexture, &m->emissiveTexture};
+            *slots[m_textureSlot] = assets.LoadTexture(a.path, m_textureSlot == 0 || m_textureSlot == 3);
+        } else if (a.type == AssetType::Sound) {
+            if (m_previewSound) m_engine.GetAudio().Stop(m_previewSound);
+            m_previewSound = m_engine.GetAudio().Play(assets.Resolve(a.path));
+        } else if (a.type == AssetType::Font) {
+            m_previewFont = m_engine.LoadFont(a.path, 32.0f);
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
     void SpawnAtCamera(const char* mesh) {
         const Camera& cam = m_engine.GetCamera();
@@ -493,7 +594,12 @@ private:
     bool m_layoutChecked = false;
     bool m_showHierarchy = true, m_showInspector = true, m_showPhysics = true, m_showTuning = true;
     bool m_showStreaming = true, m_showRenderer = true, m_showProfiler = true, m_showConsole = true, m_showDemo = false;
-    bool m_showPathTracer = true;
+    bool m_showPathTracer = true, m_showAssets = true, m_assetsDirty = true;
+    std::vector<AssetManager::Entry> m_assetList;
+    std::string m_importStatus;
+    char m_importPath[512] = {};
+    int m_textureSlot = 0, m_modelPhysics = 1, m_previewFont = 0;
+    SoundHandle m_previewSound = 0;
     bool m_hideSectorEntities = true;
     bool m_autoScroll = true;
     char m_filter[64] = {};
@@ -508,6 +614,8 @@ private:
 int main(int argc, char** argv) {
     double quitAfterSeconds = 0.0; // --quit-after <s> [--screenshot <file.bmp>] for automated checks
     std::string screenshotPath;
+    bool background = false;
+    for (int i = 1; i < argc; ++i) background |= std::string(argv[i]) == "--background";
     for (int i = 1; i + 1 < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--quit-after") quitAfterSeconds = std::atof(argv[++i]);
@@ -519,6 +627,7 @@ int main(int argc, char** argv) {
     config.width = 1720;
     config.height = 980;
     config.editorMode = true;
+    config.background = background;
 
     Engine engine;
     if (!engine.Init(config)) {
@@ -542,6 +651,7 @@ int main(int argc, char** argv) {
         editor.Update(dt);
     };
     engine.OnImGui = [&] { editor.Draw(); };
+    engine.OnFilesDropped = [&](const std::vector<std::filesystem::path>& files) { editor.ImportFiles(files); };
 
     engine.Run();
     engine.Shutdown();

@@ -2,3 +2,4 @@
 *.sh text eol=lf
 *.bmp binary
 *.png binary
+*.glb binary

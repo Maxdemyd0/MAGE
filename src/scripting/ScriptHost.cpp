@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "scripting/ScriptHost.h"
+#include "assets/AssetManager.h"
+#include "audio/AudioEngine.h"
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
@@ -115,6 +117,38 @@ void Native_DestroyEntity(uint32_t entity) { s_engine->DestroyEntity(entity); }
 int32_t Native_IsKeyDown(int32_t key) { return s_engine->GetInput().IsKeyDown(key) ? 1 : 0; }
 int32_t Native_IsKeyPressed(int32_t key) { return s_engine->GetInput().IsKeyPressed(key) ? 1 : 0; }
 int32_t Native_EntityExists(uint32_t entity) { return s_engine->GetRegistry().Valid(entity) ? 1 : 0; }
+
+uint32_t Native_SpawnModel(const char* path, const NVec3* position, const NQuat* rotation, const NVec3* scale, int32_t physics) {
+    if (!path) return NullEntity;
+    SpawnDesc d;
+    d.model = path;
+    d.name = path;
+    if (position) d.position = ToGlm(*position);
+    if (rotation) d.rotation = glm::normalize(ToGlm(*rotation));
+    if (scale) d.scale = ToGlm(*scale);
+    d.physics = physics == 2 ? SpawnPhysics::Dynamic : physics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
+    return s_engine->SpawnPrimitive(d);
+}
+int32_t Native_SetEntityTexture(uint32_t entity, int32_t slot, const char* path) {
+    auto* m = s_engine->GetRegistry().TryGet<MeshComponent>(entity);
+    if (!m || slot < 0 || slot > 3) return 0;
+    const bool srgb = slot == 0 || slot == 3;
+    const TextureHandle h = path && *path ? s_engine->GetAssets().LoadTexture(path, srgb) : 0;
+    if (path && *path && h == 0) return 0;
+    uint32_t* slots[] = {&m->baseColorTexture, &m->metallicRoughnessTexture, &m->normalTexture, &m->emissiveTexture};
+    *slots[slot] = h;
+    return 1;
+}
+uint32_t Native_PlayAudio(const char* path, float volume, float pitch, int32_t loop, const NVec3* position) {
+    if (!path) return 0;
+    const glm::vec3 p = position ? ToGlm(*position) : glm::vec3(0.0f);
+    return s_engine->GetAudio().Play(s_engine->GetAssets().Resolve(path), volume, pitch, loop != 0, position ? &p : nullptr);
+}
+void Native_StopAudio(uint32_t sound) { s_engine->GetAudio().Stop(sound); }
+int32_t Native_LoadFont(const char* path, float size) { return path ? s_engine->LoadFont(path, size) : 0; }
+void Native_DrawLabel(const char* text, float x, float y, float size, uint32_t c, int32_t font) {
+    if (text) s_engine->DrawLabel(text, {x, y}, size, glm::vec4((c >> 24) & 255, (c >> 16) & 255, (c >> 8) & 255, c & 255) / 255.0f, font);
+}
 
 #ifdef MAGE_HAS_DOTNET
 
@@ -232,6 +266,12 @@ bool ScriptHost::Init(Engine& engine, const std::filesystem::path& scriptDirecto
     bindings.IsKeyDown = &Native_IsKeyDown;
     bindings.IsKeyPressed = &Native_IsKeyPressed;
     bindings.EntityExists = &Native_EntityExists;
+    bindings.SpawnModel = &Native_SpawnModel;
+    bindings.SetEntityTexture = &Native_SetEntityTexture;
+    bindings.PlayAudio = &Native_PlayAudio;
+    bindings.StopAudio = &Native_StopAudio;
+    bindings.LoadFont = &Native_LoadFont;
+    bindings.DrawLabel = &Native_DrawLabel;
 
     m_callbacks = {};
     const int32_t initResult = managedInit(&bindings, &m_callbacks);

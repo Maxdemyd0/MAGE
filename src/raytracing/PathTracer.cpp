@@ -25,7 +25,7 @@ struct PathTracer::Impl {
 };
 PathTracer::PathTracer() : m(std::make_unique<Impl>()) { m->stats.error = "engine built with MAGE_ENABLE_VULKAN_RT=OFF"; }
 PathTracer::~PathTracer() = default;
-bool PathTracer::Init(const std::filesystem::path&, const MeshLibrary&) { return false; }
+bool PathTracer::Init(const std::filesystem::path&, const MeshLibrary&, const TextureLibrary&) { return false; }
 void PathTracer::Shutdown() {}
 bool PathTracer::Available() const { return false; }
 uint32_t PathTracer::Render(const std::vector<DrawCommand>&, const Camera&, const LightingSettings&, int, int) { return 0; }
@@ -66,8 +66,10 @@ struct GpuInstance {
     glm::vec4 misc;
     glm::uvec4 ids;
     glm::vec4 row0, row1, row2;
+    glm::uvec4 textures;  // base color, metallic-roughness, normal, emissive (0 = none)
+    glm::vec4 surface;    // normal scale, alpha, alpha cutoff, -
 };
-static_assert(sizeof(GpuInstance) == 128);
+static_assert(sizeof(GpuInstance) == 160);
 
 struct GpuLight {
     uint32_t instance;
@@ -78,7 +80,7 @@ struct GpuLight {
 
 constexpr uint32_t kFlagStatic = 1u, kFlagReset = 2u, kFlagAccumulate = 4u;
 constexpr uint32_t kCameraAutoExposure = 1u, kCameraLightSampling = 2u, kCameraAerial = 4u;
-constexpr uint32_t kInstanceTransmissive = 1u, kInstanceEmissive = 2u;
+constexpr uint32_t kInstanceTransmissive = 1u, kInstanceEmissive = 2u, kInstanceMasked = 4u;
 constexpr int kFramesInFlight = 2;
 constexpr int kBloomLevels = 6;
 constexpr VkDeviceSize kExposureBufferSize = 256 * 4 + 16;
@@ -159,6 +161,11 @@ struct PathTracer::Impl {
     bool ready = false;
 
     // Static geometry (all meshes concatenated) + one BLAS per mesh.
+    const MeshLibrary* meshLibrary = nullptr;
+    const TextureLibrary* textureLibrary = nullptr;
+    std::vector<vk::Image> textures;   // index == TextureHandle
+    VkSampler textureSampler = VK_NULL_HANDLE;
+    size_t builtMeshes = 0;
     vk::Buffer vertices, indices, meshTable;
     std::vector<vk::AccelerationStructure> blas;
     std::vector<uint32_t> meshTriangles;
@@ -207,6 +214,9 @@ struct PathTracer::Impl {
 
     bool CreatePipelines(const std::filesystem::path& shaderDir);
     bool BuildGeometry(const MeshLibrary& meshes);
+    void DestroyGeometry();
+    void UploadTextures();
+    void SyncLibraries();
     void CreateLuts();
     void CreateSlot(FrameSlot& slot);
     void DestroySlot(FrameSlot& slot);
@@ -242,6 +252,7 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     add(21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3);
     add(22, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kBloomLevels);
     add(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBloomLevels);
+    add(24, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TextureLibrary::kMaxTextures);
 
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     lci.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -286,7 +297,7 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
                                           {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 * kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, (16 + 3 + kBloomLevels) * kFramesInFlight},
-                                          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (1 + 3 + kBloomLevels) * kFramesInFlight}};
+                                          {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (1 + 3 + kBloomLevels + TextureLibrary::kMaxTextures) * kFramesInFlight}};
     VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.maxSets = kFramesInFlight;
     dpci.poolSizeCount = 5;
@@ -300,7 +311,93 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     sci.maxLod = 0.0f;
     vkCreateSampler(dev, &sci, nullptr, &sampler);
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.maxLod = VK_LOD_CLAMP_NONE;
+    vkCreateSampler(dev, &sci, nullptr, &textureSampler);
     return true;
+}
+
+void PathTracer::Impl::DestroyGeometry() {
+    for (auto& as : blas) ctx.DestroyAccelerationStructure(as);
+    blas.clear();
+    meshTriangles.clear();
+    meshExtents.clear();
+    for (vk::Buffer* b : {&vertices, &indices, &meshTable}) ctx.DestroyBuffer(*b);
+}
+
+// Uploads textures added since the last call. The GPU must be idle.
+void PathTracer::Impl::UploadTextures() {
+    for (size_t i = textures.size(); i < textureLibrary->Count(); ++i) {
+        const Texture& t = *textureLibrary->Get(static_cast<TextureHandle>(i));
+        vk::Image img = ctx.CreateTexture(static_cast<uint32_t>(t.mips[0].width), static_cast<uint32_t>(t.mips[0].height),
+                                          static_cast<uint32_t>(t.mips.size()), t.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM);
+        size_t total = 0;
+        for (const TextureMip& m : t.mips) total += m.rgba.size();
+        vk::Buffer staging = ctx.CreateBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, vk::MemoryKind::Upload);
+        if (!img.image || !staging.mapped) { // out of memory: show white instead
+            ctx.DestroyImage(img);
+            ctx.DestroyBuffer(staging);
+            textures.push_back(vk::Image{});
+            continue;
+        }
+        std::vector<VkBufferImageCopy> copies;
+        size_t offset = 0;
+        for (size_t l = 0; l < t.mips.size(); ++l) {
+            const TextureMip& m = t.mips[l];
+            std::memcpy(static_cast<uint8_t*>(staging.mapped) + offset, m.rgba.data(), m.rgba.size());
+            VkBufferImageCopy c{};
+            c.bufferOffset = offset;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(l), 0, 1};
+            c.imageExtent = {static_cast<uint32_t>(m.width), static_cast<uint32_t>(m.height), 1};
+            copies.push_back(c);
+            offset += m.rgba.size();
+        }
+        vmaFlushAllocation(ctx.allocator, staging.allocation, 0, VK_WHOLE_SIZE);
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = img.image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, static_cast<uint32_t>(t.mips.size()), 0, 1};
+        VkCommandBuffer c = ctx.BeginOneShot();
+        vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        vkCmdCopyBufferToImage(c, staging.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(copies.size()), copies.data());
+        b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+        ctx.EndOneShot(c);
+        ctx.DestroyBuffer(staging);
+        textures.push_back(img);
+    }
+    // Unused array slots point at the white texture, so every descriptor stays valid.
+    std::vector<VkDescriptorImageInfo> infos(TextureLibrary::kMaxTextures);
+    for (size_t i = 0; i < infos.size(); ++i)
+        infos[i] = {textureSampler, textures[i < textures.size() && textures[i].view ? i : 0].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    for (FrameSlot& slot : slots) {
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.descriptorSet, 24, 0,
+                               static_cast<uint32_t>(infos.size()), VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER};
+        w.pImageInfo = infos.data();
+        vkUpdateDescriptorSets(ctx.device, 1, &w, 0, nullptr);
+    }
+}
+
+// Picks up meshes and textures that were imported since the last frame.
+void PathTracer::Impl::SyncLibraries() {
+    const bool newMeshes = meshLibrary->All().size() != builtMeshes;
+    const bool newTextures = textureLibrary->Count() != textures.size();
+    if (!newMeshes && !newTextures) return;
+    WaitIdle();
+    if (newTextures) UploadTextures();
+    if (newMeshes) {
+        DestroyGeometry();
+        BuildGeometry(*meshLibrary);
+        for (FrameSlot& slot : slots) WriteSceneDescriptors(slot);
+    }
+    resetRequested = true;
 }
 
 bool PathTracer::Impl::BuildGeometry(const MeshLibrary& meshes) {
@@ -383,6 +480,7 @@ bool PathTracer::Impl::BuildGeometry(const MeshLibrary& meshes) {
         ai.accelerationStructure = as.handle;
         as.address = vkGetAccelerationStructureDeviceAddressKHR(ctx.device, &ai);
     }
+    builtMeshes = meshCount;
     Log::Info("Path tracer: built {} BLAS ({} triangles)", meshCount, indexData.size() / 3);
     return true;
 }
@@ -669,7 +767,9 @@ void PathTracer::Impl::Display(FrameSlot& slot) {
 PathTracer::PathTracer() : m(std::make_unique<Impl>()) {}
 PathTracer::~PathTracer() { Shutdown(); }
 
-bool PathTracer::Init(const std::filesystem::path& shaderDirectory, const MeshLibrary& meshes) {
+bool PathTracer::Init(const std::filesystem::path& shaderDirectory, const MeshLibrary& meshes, const TextureLibrary& textures) {
+    m->meshLibrary = &meshes;
+    m->textureLibrary = &textures;
     std::string error;
     if (!m->ctx.Init(error)) {
         m->stats.error = error;
@@ -682,6 +782,7 @@ bool PathTracer::Init(const std::filesystem::path& shaderDirectory, const MeshLi
     }
     m->CreateLuts();
     for (FrameSlot& slot : m->slots) m->CreateSlot(slot);
+    m->UploadTextures();
     m->ready = true;
     m->stats.available = true;
     Log::Info("Path tracer ready on {} ({} frames in flight, physical sky + camera)", m->ctx.deviceName, kFramesInFlight);
@@ -694,15 +795,18 @@ void PathTracer::Shutdown() {
     VkDevice dev = m->ctx.device;
     m->DestroyTargets();
     for (FrameSlot& slot : m->slots) m->DestroySlot(slot);
-    for (auto& as : m->blas) m->ctx.DestroyAccelerationStructure(as);
-    m->blas.clear();
+    m->DestroyGeometry();
+    for (vk::Image& img : m->textures) m->ctx.DestroyImage(img);
+    m->textures.clear();
     for (vk::Image& img : m->luts) m->ctx.DestroyImage(img);
-    for (vk::Buffer* b : {&m->vertices, &m->indices, &m->meshTable, &m->exposure}) m->ctx.DestroyBuffer(*b);
+    m->ctx.DestroyBuffer(m->exposure);
     for (VkPipeline& p : m->pipelines) {
         if (p) vkDestroyPipeline(dev, p, nullptr);
         p = VK_NULL_HANDLE;
     }
     if (m->sampler) vkDestroySampler(dev, m->sampler, nullptr);
+    if (m->textureSampler) vkDestroySampler(dev, m->textureSampler, nullptr);
+    m->textureSampler = VK_NULL_HANDLE;
     if (m->pipelineLayout) vkDestroyPipelineLayout(dev, m->pipelineLayout, nullptr);
     if (m->setLayout) vkDestroyDescriptorSetLayout(dev, m->setLayout, nullptr);
     if (m->descriptorPool) vkDestroyDescriptorPool(dev, m->descriptorPool, nullptr);
@@ -726,6 +830,7 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
     if (!m->ready || outputWidth <= 0 || outputHeight <= 0) return 0;
     Impl& s = *m;
     s.CollectFinished();
+    s.SyncLibraries();
 
     // ---- Resolution ----------------------------------------------------------------------------
     const float scale = std::clamp(settings.renderScale, 0.25f, 1.0f);
@@ -755,6 +860,7 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         if (c.mesh >= s.blas.size() || !s.blas[c.mesh].handle) continue;
         const Material& mat = c.material;
         const bool transmissive = mat.transmission > 0.0f;
+        const bool masked = mat.alphaCutoff > 0.0f;
         const float emitted = Luminance(mat.emissive);
 
         VkAccelerationStructureInstanceKHR inst{};
@@ -763,7 +869,7 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         inst.instanceCustomIndex = count;
         inst.mask = 0xFF;
         inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
-                     (transmissive ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : 0u);
+                     (transmissive || masked ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : 0u);
         inst.accelerationStructureReference = s.blas[c.mesh].address;
         vkInstances[count] = inst; // write-only: mapped memory is write-combined
 
@@ -772,10 +878,12 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         gi.emissionRoughness = glm::vec4(mat.emissive, mat.roughness);
         gi.layer = glm::vec4(mat.checkerScale, mat.clearcoat, mat.clearcoatRoughness, std::clamp(mat.transmission, 0.0f, 1.0f));
         gi.misc = glm::vec4(mat.ior, 0.0f, 0.0f, 0.0f);
-        gi.ids = glm::uvec4(c.mesh, s.meshTriangles[c.mesh], (transmissive ? kInstanceTransmissive : 0u) | (emitted > 0.0f ? kInstanceEmissive : 0u), 0u);
+        gi.ids = glm::uvec4(c.mesh, s.meshTriangles[c.mesh], (transmissive ? kInstanceTransmissive : 0u) | (emitted > 0.0f ? kInstanceEmissive : 0u) | (masked ? kInstanceMasked : 0u), 0u);
         gi.row0 = glm::vec4(c.model[0][0], c.model[1][0], c.model[2][0], c.model[3][0]);
         gi.row1 = glm::vec4(c.model[0][1], c.model[1][1], c.model[2][1], c.model[3][1]);
         gi.row2 = glm::vec4(c.model[0][2], c.model[1][2], c.model[2][2], c.model[3][2]);
+        gi.textures = glm::uvec4(mat.baseColorTexture, mat.metallicRoughnessTexture, mat.normalTexture, mat.emissiveTexture);
+        gi.surface = glm::vec4(mat.normalScale, mat.alpha, mat.alphaCutoff, 0.0f);
         s.instanceScratch.push_back(gi);
 
         if (emitted > 0.0f && settings.lightSampling) {
@@ -812,6 +920,8 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         materialHash.Add(gi.layer);
         materialHash.Add(gi.misc);
         materialHash.Add(gi.ids);
+        materialHash.Add(gi.textures);
+        materialHash.Add(gi.surface);
     }
 
     // ---- Static detection: compare against the snapshot taken when accumulation started ----------
@@ -890,7 +1000,8 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
     ubo.size = glm::uvec4(w, h, count, static_cast<uint32_t>(iterations));
     const uint32_t cameraFlags = (settings.autoExposure ? kCameraAutoExposure : 0u) | (settings.lightSampling ? kCameraLightSampling : 0u) |
                                  (settings.aerialPerspective ? kCameraAerial : 0u);
-    ubo.counts = glm::uvec4(static_cast<uint32_t>(s.lightScratch.size()), settings.bloomIntensity > 0.0f ? kBloomLevels : 0, cameraFlags, 0u);
+    ubo.counts = glm::uvec4(static_cast<uint32_t>(s.lightScratch.size()), settings.bloomIntensity > 0.0f ? kBloomLevels : 0, cameraFlags,
+                            glm::floatBitsToUint(2.0f * std::tan(glm::radians(camera.fovDegrees) * 0.5f) / static_cast<float>(h)));
     std::memcpy(slot->ubo.mapped, &ubo, sizeof(ubo));
 
     // Atmosphere LUTs that only depend on the medium (not the sun): rebuild when it changes.

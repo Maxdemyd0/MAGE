@@ -47,7 +47,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Runtime flags
 
-`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus or keyboard, for automated runs), `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
+`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--load-model <file>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
 the real C++ -> C# -> Jolt path), `--quit-after <seconds>`, `--screenshot <file.bmp>`.
 
 Automated smoke test:
@@ -138,6 +138,35 @@ To add a gameplay script, derive from `Mage.Entity` in `scripting/GameScripts`, 
 
 Positions are relative to the sector centre. The default sector size is 96 m. `physics` is one of `static`, `dynamic` or `none`.
 The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
+
+### Importing assets
+
+| Kind | Formats | Notes |
+| --- | --- | --- |
+| Models | `.gltf` `.glb` `.fbx` `.obj` | Static geometry, hierarchy, PBR materials and textures. Metres, Y up |
+| Textures | `.png` `.jpg` `.tga` `.bmp` and other stb_image formats | Base color, metallic-roughness, normal, emissive |
+| Fonts | `.ttf` `.otf` | Latin, Greek, Cyrillic |
+| Sounds | `.wav` `.mp3` `.flac` `.ogg` | Flat or 3D |
+
+In the editor, drop files onto the window or paste a path in the **Assets** panel. Files are copied with their
+dependencies into `assets/` and never overwrite an existing one. From C#, paths are relative to `assets/`:
+
+```csharp
+uint crate = Assets.SpawnModel("models/sample/sample.glb", position, rotation, scale, ModelPhysics.Static);
+Assets.SetTexture(entity, "textures/wood.png");
+Audio.Play("sounds/horn.wav", position: Position);
+int font = Text.LoadFont("fonts/ui.ttf", 32);
+Text.Draw("Hello", 20, 20, 32, 0xFFFFFFFF, font);   // every frame
+```
+
+Sector entities accept `"model"` and `"texture"`. Static models collide with their exact triangles, dynamic ones with
+their convex hull. `tests/make_sample_model.py` regenerates the sample model.
+
+Not supported: skinning and animation, morph targets, Draco/meshopt compression, KTX2, vertex colors, a second UV set,
+and `KHR_texture_transform`. Blended transparency is approximated with a cut-out. FBX files with separate
+roughness/metalness maps use the plain values. The path tracer holds at most 1024 textures.
+
+Tests (headless): `ctest --test-dir build -C Release`.
 
 ## License
 

@@ -47,6 +47,12 @@ namespace Mage.Interop
         public delegate* unmanaged<int, int> IsKeyDown;
         public delegate* unmanaged<int, int> IsKeyPressed;
         public delegate* unmanaged<uint, int> EntityExists;
+        public delegate* unmanaged<byte*, Vector3*, Quaternion*, Vector3*, int, uint> SpawnModel;
+        public delegate* unmanaged<uint, int, byte*, int> SetEntityTexture;
+        public delegate* unmanaged<byte*, float, float, int, Vector3*, uint> PlayAudio;
+        public delegate* unmanaged<uint, void> StopAudio;
+        public delegate* unmanaged<byte*, float, int> LoadFont;
+        public delegate* unmanaged<byte*, float, float, float, uint, int, void> DrawLabel;
     }
 
     /// <summary>Managed lifecycle entry points that C# hands back to the engine.</summary>
@@ -66,7 +72,7 @@ namespace Mage.Interop
     /// </summary>
     internal static unsafe class InternalCalls
     {
-        public const uint InteropVersion = 1;
+        public const uint InteropVersion = 2;
         public const uint InvalidEntity = 0xFFFFFFFF;
 
         private static NativeBindings s_native;
@@ -138,6 +144,48 @@ namespace Mage.Interop
             IntPtr name = Marshal.StringToCoTaskMemUTF8(mesh);
             try { return s_native.SpawnEntity((byte*)name, &position, &rotation, &scale, dynamic ? 1 : 0); }
             finally { Marshal.FreeCoTaskMem(name); }
+        }
+
+        // UTF-8 copy of a string that lives for one native call.
+        private readonly ref struct Utf8
+        {
+            private readonly IntPtr _ptr;
+            public Utf8(string text) { _ptr = Marshal.StringToCoTaskMemUTF8(text); }
+            public byte* Ptr => (byte*)_ptr;
+            public void Dispose() => Marshal.FreeCoTaskMem(_ptr);
+        }
+
+        public static uint SpawnModel(string path, Vector3 position, Quaternion rotation, Vector3 scale, int physics)
+        {
+            using var p = new Utf8(path);
+            return s_native.SpawnModel(p.Ptr, &position, &rotation, &scale, physics);
+        }
+
+        public static bool SetEntityTexture(uint entity, int slot, string path)
+        {
+            using var p = new Utf8(path);
+            return s_native.SetEntityTexture(entity, slot, p.Ptr) != 0;
+        }
+
+        public static uint PlayAudio(string path, float volume, float pitch, bool loop, Vector3? position)
+        {
+            using var p = new Utf8(path);
+            Vector3 pos = position ?? default;
+            return s_native.PlayAudio(p.Ptr, volume, pitch, loop ? 1 : 0, position.HasValue ? &pos : null);
+        }
+
+        public static void StopAudio(uint sound) => s_native.StopAudio(sound);
+
+        public static int LoadFont(string path, float size)
+        {
+            using var p = new Utf8(path);
+            return s_native.LoadFont(p.Ptr, size);
+        }
+
+        public static void DrawLabel(string text, float x, float y, float size, uint rgba, int font)
+        {
+            using var t = new Utf8(text);
+            s_native.DrawLabel(t.Ptr, x, y, size, rgba, font);
         }
 
         public static void DestroyEntity(uint entity) => s_native.DestroyEntity(entity);

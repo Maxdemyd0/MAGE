@@ -33,6 +33,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(Dependencies)
 include(DotNet)
 include(Vulkan)
+include(Import)
 
 # -----------------------------------------------------------------------------
 #  MAGE_Engine - the core engine library (shared by default)
@@ -48,6 +49,11 @@ set(MAGE_ENGINE_SOURCES
     src/core/Engine.h               src/core/Engine.cpp
     src/renderer/GL.h               src/renderer/GL.cpp
     src/renderer/Mesh.h             src/renderer/Mesh.cpp
+    src/renderer/Material.h
+    src/renderer/Texture.h          src/renderer/Texture.cpp
+    src/assets/Importers.h          src/assets/Importers.cpp
+    src/assets/AssetManager.h       src/assets/AssetManager.cpp
+    src/audio/AudioEngine.h         src/audio/AudioEngine.cpp
     src/renderer/Shader.h           src/renderer/Shader.cpp
     src/renderer/Renderer.h         src/renderer/Renderer.cpp
     src/renderer/PhysicsDebugRenderer.h src/renderer/PhysicsDebugRenderer.cpp
@@ -60,7 +66,7 @@ set(MAGE_ENGINE_SOURCES
 )
 
 if(MAGE_BUILD_SHARED)
-    add_library(MAGE_Engine SHARED ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui>)
+    add_library(MAGE_Engine SHARED ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import>)
     set_target_properties(MAGE_Engine PROPERTIES
         DEFINE_SYMBOL MAGE_ENGINE_BUILD
         CXX_VISIBILITY_PRESET hidden
@@ -78,13 +84,14 @@ if(MAGE_BUILD_SHARED)
     target_compile_definitions(mage_imgui PRIVATE "IMGUI_API=${_imgui_export}")
     target_compile_definitions(MAGE_Engine PRIVATE "IMGUI_API=${_imgui_export}" INTERFACE "IMGUI_API=${_imgui_import}")
 else()
-    add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui>)
+    add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import>)
 endif()
 
 target_include_directories(MAGE_Engine PUBLIC
     "${CMAKE_SOURCE_DIR}/src"
     $<TARGET_PROPERTY:mage_imgui,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:glfw,INTERFACE_INCLUDE_DIRECTORIES>)   # GLFW key codes for apps
+target_include_directories(MAGE_Engine SYSTEM PRIVATE $<TARGET_PROPERTY:mage_import,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(MAGE_Engine
     PUBLIC
         GLFW_INCLUDE_NONE
@@ -94,6 +101,9 @@ target_compile_definitions(MAGE_Engine
         MAGE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
         $<$<PLATFORM_ID:Windows>:NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS>
 )
+if(WIN32)
+    target_link_libraries(MAGE_Engine PRIVATE winmm)
+endif()
 target_link_libraries(MAGE_Engine
     PUBLIC  glm::glm
     PRIVATE glfw Jolt nlohmann_json::nlohmann_json $<$<PLATFORM_ID:Windows>:opengl32>
@@ -157,6 +167,16 @@ endfunction()
 
 mage_add_executable(MAGE_Runtime src/main.cpp)
 mage_add_executable(MAGE_Editor  src/editor/EditorMain.cpp)
+
+# -----------------------------------------------------------------------------
+#  Tests (headless: no window, GPU or audio device):  ctest --test-dir build -C Release
+# -----------------------------------------------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+    mage_add_executable(MAGE_Tests tests/ImportTests.cpp)
+    target_include_directories(MAGE_Tests SYSTEM PRIVATE $<TARGET_PROPERTY:mage_import,INTERFACE_INCLUDE_DIRECTORIES>)
+    add_test(NAME import COMMAND MAGE_Tests)
+endif()
 
 if(MSVC)
     set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT MAGE_Runtime)

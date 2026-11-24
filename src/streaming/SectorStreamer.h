@@ -54,6 +54,8 @@ struct SectorEntityDesc {
     float clearcoat = 0.0f;
     float transmission = 0.0f;
     float ior = 1.5f;
+    std::string model;             // imported model, replaces 'mesh'
+    std::string texture;
     SectorPhysics physics = SectorPhysics::Static;
     float mass = 0.0f;
 };

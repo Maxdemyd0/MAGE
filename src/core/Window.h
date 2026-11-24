@@ -4,7 +4,9 @@
 #include "core/Export.h"
 // MAGE v1 - GLFW window + OpenGL context.
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -32,6 +34,8 @@ public:
     void SetVSync(bool enabled);
     bool VSync() const { return m_vsync; }
     void SetTitle(const std::string& title);
+
+    std::vector<std::filesystem::path> TakeDroppedFiles(); // files dragged onto the window
 
     int GLMajor() const { return m_glMajor; }
     int GLMinor() const { return m_glMinor; }

@@ -33,6 +33,8 @@ class Renderer;
 class PhysicsWorld;
 class SectorStreamer;
 class ScriptHost;
+class AssetManager;
+class AudioEngine;
 struct SectorData;
 struct SectorCoord;
 struct VehicleDesc;
@@ -59,6 +61,8 @@ enum class SpawnPhysics : uint8_t { None, Static, Kinematic, Dynamic };
 struct SpawnDesc {
     std::string name = "Entity";
     std::string mesh = "cube";      // cube | sphere | cylinder | cone | plane
+    std::string model;              // imported model file; replaces mesh + material when set
+    std::string texture;            // base colour texture for the primitive
     glm::vec3 position{0.0f};
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec3 scale{1.0f};
@@ -104,11 +108,12 @@ public:
     std::function<void(float)> OnUpdate;        // variable rate, after interpolation
     std::function<void(float)> OnFixedUpdate;   // 60 Hz, before the physics step
     std::function<void()> OnImGui;              // inside the ImGui frame
+    std::function<void(const std::vector<std::filesystem::path>&)> OnFilesDropped;
 
     // Entities.
     Entity CreateEntity(const std::string& name);
     void DestroyEntity(Entity entity);          // deferred to the end of the frame
-    Entity SpawnPrimitive(const SpawnDesc& desc);
+    Entity SpawnPrimitive(const SpawnDesc& desc);   // NullEntity if desc.model cannot be loaded
     Entity SpawnVehicle(const std::string& name, const VehicleDesc& desc, const glm::vec3& color,
                         const std::string& scriptClass = {});
     bool GetEntityTransform(Entity entity, glm::vec3& position, glm::quat& rotation) const;
@@ -127,6 +132,14 @@ public:
     SectorStreamer& GetStreamer() { return *m_streamer; }
     ScriptHost& GetScriptHost() { return *m_scripts; }
     Input& GetInput() { return m_input; }
+    AssetManager& GetAssets() { return *m_assets; }
+    AudioEngine& GetAudio() { return *m_audio; }
+
+    // Fonts and on-screen text. A font becomes usable on the next frame; until then (and for
+    // handle 0) the built-in font is used. Text lasts one frame: draw it from an update hook.
+    int LoadFont(const std::string& path, float sizePixels); // 0 on failure
+    void DrawLabel(const std::string& text, const glm::vec2& position, float sizePixels, const glm::vec4& color, int font = 0);
+    void SetViewportOrigin(const glm::vec2& origin) { m_viewportOrigin = origin; }
     Camera& GetCamera() { return m_camera; }
     Profiler& GetProfiler() { return m_profiler; }
     const FrameStats& GetFrameStats() const { return m_stats; }
@@ -153,6 +166,8 @@ public:
 private:
     void InitImGui();
     void ShutdownImGui();
+    void BuildPendingFonts();
+    void DrawLabels();
     void FixedStep(float dt);
     void InterpolateTransforms(float alpha);
     void SubmitScene();
@@ -170,6 +185,14 @@ private:
     std::unique_ptr<PhysicsWorld> m_physics;
     std::unique_ptr<SectorStreamer> m_streamer;
     std::unique_ptr<ScriptHost> m_scripts;
+    std::unique_ptr<AssetManager> m_assets;
+    std::unique_ptr<AudioEngine> m_audio;
+    struct FontEntry { std::string key; std::filesystem::path file; float size; void* font = nullptr; };
+    struct Label { std::string text; glm::vec2 position; float size; glm::vec4 color; int font; };
+    std::vector<FontEntry> m_fonts;
+    std::vector<Label> m_labels;
+    glm::vec2 m_viewportOrigin{0.0f};
+    bool m_fontsDirty = false;
     Registry m_registry;
     Input m_input;
     Camera m_camera;

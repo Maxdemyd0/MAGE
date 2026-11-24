@@ -22,6 +22,7 @@ namespace mage {
 
 class Camera;
 class MeshLibrary;
+class TextureLibrary;
 struct DrawCommand;
 struct LightingSettings;
 
@@ -94,8 +95,9 @@ public:
     PathTracer(const PathTracer&) = delete;
     PathTracer& operator=(const PathTracer&) = delete;
 
-    // Builds bottom-level acceleration structures for every mesh in the library.
-    bool Init(const std::filesystem::path& shaderDirectory, const MeshLibrary& meshes);
+    // Builds acceleration structures for every mesh. Meshes and textures added later are picked up
+    // automatically; both libraries must outlive the path tracer.
+    bool Init(const std::filesystem::path& shaderDirectory, const MeshLibrary& meshes, const TextureLibrary& textures);
     void Shutdown();
     bool Available() const;
 

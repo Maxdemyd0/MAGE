@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -24,7 +25,7 @@ class Renderer;
 
 enum class ObjectLayer : uint16_t { StaticWorld = 0, DynamicProp = 1, Vehicle = 2, Ragdoll = 3, Count = 4 };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
-enum class ShapeType : uint8_t { Box, Sphere, Cylinder, Capsule };
+enum class ShapeType : uint8_t { Box, Sphere, Cylinder, Capsule, ConvexHull, Mesh };
 
 using BodyHandle = uint32_t;
 inline constexpr BodyHandle InvalidBody = 0xFFFFFFFFu;
@@ -34,6 +35,8 @@ inline constexpr VehicleHandle InvalidVehicle = 0xFFFFFFFFu;
 struct BodyDesc {
     ShapeType shape = ShapeType::Box;
     glm::vec3 halfExtents{0.5f};   // Box: half extents | Sphere: x = radius | Cylinder/Capsule: x = radius, y = half height
+    std::vector<glm::vec3> points;   // ConvexHull / Mesh vertices, already scaled
+    std::vector<uint32_t> triangles; // Mesh only (static bodies): 3 indices per triangle
     glm::vec3 position{0.0f};
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     MotionType motion = MotionType::Static;

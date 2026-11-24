@@ -1,0 +1,17 @@
+# =============================================================================
+#  Asset import libraries (single-file C libraries, compiled into MAGE_Engine)
+# =============================================================================
+FetchContent_Declare(cgltf URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.15.tar.gz DOWNLOAD_EXTRACT_TIMESTAMP TRUE SOURCE_SUBDIR _none)
+FetchContent_Declare(ufbx URL https://github.com/ufbx/ufbx/archive/refs/tags/v0.23.1.tar.gz DOWNLOAD_EXTRACT_TIMESTAMP TRUE SOURCE_SUBDIR _none)
+FetchContent_Declare(stb URL https://github.com/nothings/stb/archive/6b5799bae8a1fe3792691ef4b72ae26434c3e799.tar.gz DOWNLOAD_EXTRACT_TIMESTAMP TRUE SOURCE_SUBDIR _none)
+FetchContent_Declare(miniaudio URL https://github.com/mackron/miniaudio/archive/refs/tags/0.11.26.tar.gz DOWNLOAD_EXTRACT_TIMESTAMP TRUE SOURCE_SUBDIR _none)
+FetchContent_MakeAvailable(cgltf ufbx stb miniaudio)
+add_library(mage_import OBJECT "${CMAKE_SOURCE_DIR}/src/assets/ThirdParty.c" "${ufbx_SOURCE_DIR}/ufbx.c")
+target_include_directories(mage_import SYSTEM PUBLIC ${cgltf_SOURCE_DIR} ${ufbx_SOURCE_DIR} ${stb_SOURCE_DIR} ${miniaudio_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(mage_import PRIVATE /W0)
+    target_compile_definitions(mage_import PRIVATE _CRT_SECURE_NO_WARNINGS)
+else()
+    target_compile_options(mage_import PRIVATE -w)
+endif()
+set_target_properties(mage_import PROPERTIES FOLDER "ThirdParty")

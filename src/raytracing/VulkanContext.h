@@ -44,6 +44,7 @@ public:
     Buffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, MemoryKind kind, VkDeviceSize alignment = 0);
     void DestroyBuffer(Buffer& buffer);
     Image CreateImage(uint32_t width, uint32_t height, VkFormat format);
+    Image CreateTexture(uint32_t width, uint32_t height, uint32_t mips, VkFormat format);
     void DestroyImage(Image& image);
     void DestroyAccelerationStructure(AccelerationStructure& as);
 

@@ -4,10 +4,15 @@
 #include "core/Log.h"
 
 #include <GLFW/glfw3.h>
+#include <utility>
 
 namespace mage {
 
 namespace {
+std::vector<std::filesystem::path> s_dropped;
+void DropCallback(GLFWwindow*, int count, const char** paths) {
+    for (int i = 0; i < count; ++i) s_dropped.emplace_back(std::u8string(reinterpret_cast<const char8_t*>(paths[i])));
+}
 void GlfwErrorCallback(int code, const char* description) {
     Log::Error("[GLFW] ({}) {}", code, description ? description : "");
 }
@@ -49,11 +54,14 @@ bool Window::Create(const std::string& title, int width, int height, bool vsync,
         return false;
     }
 
+    glfwSetDropCallback(m_window, DropCallback);
     glfwMakeContextCurrent(m_window);
     SetVSync(vsync);
     Log::Info("Window created ({}x{}), OpenGL {}.{} core context", width, height, m_glMajor, m_glMinor);
     return true;
 }
+
+std::vector<std::filesystem::path> Window::TakeDroppedFiles() { return std::exchange(s_dropped, {}); }
 
 void Window::Destroy() {
     if (m_window) {

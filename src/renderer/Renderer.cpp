@@ -72,6 +72,14 @@ uniform float uMetallic;
 uniform float uRoughness;
 uniform float uChecker;
 uniform vec3 uEmissive;
+uniform sampler2D uBaseColorMap;
+uniform sampler2D uMetalRoughMap;
+uniform sampler2D uNormalMap;
+uniform sampler2D uEmissiveMap;
+uniform int uHasNormalMap;
+uniform float uNormalScale;
+uniform float uAlpha;
+uniform float uAlphaCutoff;
 uniform vec3 uCameraPos;
 uniform float uSunIntensity;
 uniform float uAmbient;
@@ -108,8 +116,26 @@ float ShadowFactor(vec3 N, vec3 L) {
     return sum / 9.0;
 }
 
+// Tangent frame from screen-space derivatives (no per-vertex tangents needed).
+vec3 PerturbNormal(vec3 N, vec3 sampleN) {
+    vec3 dp1 = dFdx(vWorldPos), dp2 = dFdy(vWorldPos);
+    vec2 duv1 = dFdx(vUV), duv2 = dFdy(vUV);
+    vec3 dp2perp = cross(dp2, N), dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float m = max(dot(T, T), dot(B, B));
+    if (m < 1e-20) return N;
+    float inv = inversesqrt(m);
+    // glTF: +Y of the map points towards decreasing V, so the V-derivative bitangent is flipped.
+    return normalize(T * inv * sampleN.x - B * inv * sampleN.y + N * sampleN.z);
+}
+
 void main() {
-    vec3 albedo = uAlbedo;
+    vec4 base = texture(uBaseColorMap, vUV);
+    if (uAlphaCutoff > 0.0 && base.a * uAlpha < uAlphaCutoff) discard;
+    vec3 albedo = uAlbedo * base.rgb;
+    vec4 mr = texture(uMetalRoughMap, vUV);
+    float metallic = uMetallic * mr.b;
     if (uChecker > 0.0) {
         vec2 cell = floor(vWorldPos.xz / uChecker);
         float checker = mod(cell.x + cell.y, 2.0);
@@ -118,21 +144,25 @@ void main() {
         albedo *= mix(0.55, 1.0, checker) * (1.0 - 0.35 * clamp(line, 0.0, 1.0));
     }
 
-    vec3 N = normalize(vNormal);
+    vec3 N = normalize(gl_FrontFacing ? vNormal : -vNormal);
+    if (uHasNormalMap != 0) {
+        vec3 nm = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+        N = PerturbNormal(N, vec3(nm.xy * uNormalScale, nm.z));
+    }
     vec3 V = normalize(uCameraPos - vWorldPos);
     vec3 L = normalize(uSunDir);
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 1e-4);
     float NdotH = max(dot(N, H), 0.0);
-    float roughness = clamp(uRoughness, 0.04, 1.0);
+    float roughness = clamp(uRoughness * mr.g, 0.04, 1.0);
 
-    vec3 F0 = mix(vec3(0.04), albedo, uMetallic);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
     float D = DistributionGGX(NdotH, roughness);
     float G = GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
     vec3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, 1e-4);
-    vec3 kD = (vec3(1.0) - F) * (1.0 - uMetallic);
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
 
     float shadow = ShadowFactor(N, L);
     vec3 direct = (kD * albedo / PI + specular) * uSunColor * uSunIntensity * NdotL * shadow;
@@ -141,10 +171,10 @@ void main() {
     vec3 hemi = mix(uGroundColor, mix(uSkyHorizon, uSkyZenith, 0.5), N.y * 0.5 + 0.5) * uAmbient;
     vec3 Fa = FresnelSchlick(NdotV, F0);
     vec3 R = reflect(-V, N);
-    vec3 ambient = (1.0 - Fa) * (1.0 - uMetallic) * albedo * hemi
+    vec3 ambient = (1.0 - Fa) * (1.0 - metallic) * albedo * hemi
                  + Fa * SkyColor(R) * uAmbient * (1.0 - roughness * 0.85);
 
-    vec3 color = direct + ambient + uEmissive;
+    vec3 color = direct + ambient + uEmissive * texture(uEmissiveMap, vUV).rgb;
 
     float dist = length(uCameraPos - vWorldPos);
     float fog = 1.0 - exp(-pow(dist * uFogDensity, 1.6));
@@ -156,13 +186,19 @@ void main() {
 
 const char* kShadowVS = R"(#version 410 core
 layout(location = 0) in vec3 aPosition;
+layout(location = 2) in vec2 aUV;
 uniform mat4 uLightViewProj;
 uniform mat4 uModel;
-void main() { gl_Position = uLightViewProj * uModel * vec4(aPosition, 1.0); }
+out vec2 vUV;
+void main() { vUV = aUV; gl_Position = uLightViewProj * uModel * vec4(aPosition, 1.0); }
 )";
 
 const char* kShadowFS = R"(#version 410 core
-void main() {}
+in vec2 vUV;
+uniform sampler2D uBaseColorMap;
+uniform float uAlpha;
+uniform float uAlphaCutoff;
+void main() { if (uAlphaCutoff > 0.0 && texture(uBaseColorMap, vUV).a * uAlpha < uAlphaCutoff) discard; }
 )";
 
 const char* kSkyVS = R"(#version 410 core
@@ -254,6 +290,7 @@ bool Renderer::Init(const std::filesystem::path& shaderDirectory) {
         return false;
     }
 
+    m_textures.CreateDefaults();
     m_meshes.CreateDefaultPrimitives();
 
     glGenVertexArrays(1, &m_emptyVao);
@@ -272,7 +309,7 @@ bool Renderer::Init(const std::filesystem::path& shaderDirectory) {
 
     // Optional hardware path tracer (Vulkan ray queries).
     m_pathTracer = std::make_unique<PathTracer>();
-    if (!shaderDirectory.empty() && m_pathTracer->Init(shaderDirectory, m_meshes)) {
+    if (!shaderDirectory.empty() && m_pathTracer->Init(shaderDirectory, m_meshes, m_textures)) {
         Log::Info("Rendering mode: hardware path tracing (F3 toggles raster)");
     } else {
         Log::Warn("Path tracer unavailable ({}) - using the raster renderer",
@@ -289,6 +326,7 @@ void Renderer::Shutdown() {
     if (m_pathTracer) m_pathTracer->Shutdown();
     m_pathTracer.reset();
     m_meshes.Destroy();
+    m_textures.Destroy();
     DestroyRenderTarget(m_viewport);
     if (m_shadowTex) glDeleteTextures(1, &m_shadowTex);
     if (m_shadowFbo) glDeleteFramebuffers(1, &m_shadowFbo);
@@ -507,16 +545,25 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         glPolygonOffset(1.5f, 3.0f);
         m_shadowShader.Bind();
         m_shadowShader.SetMat4("uLightViewProj", lightVP);
+        m_shadowShader.SetInt("uBaseColorMap", 1);
+        glActiveTexture(GL_TEXTURE0 + 1);
         for (const DrawCommand& cmd : m_commands) {
             if (!cmd.castShadows) continue;
             const Mesh* mesh = m_meshes.Get(cmd.mesh);
             const AABB world = mesh->bounds.Transformed(cmd.model);
             if (!lightFrustum.IntersectsAABB(world.min, world.max)) continue;
             m_shadowShader.SetMat4("uModel", cmd.model);
+            m_shadowShader.SetFloat("uAlpha", cmd.material.alpha);
+            m_shadowShader.SetFloat("uAlphaCutoff", cmd.material.alphaCutoff);
+            const Texture* alphaMap = m_textures.Get(cmd.material.baseColorTexture);
+            if (cmd.material.alphaCutoff > 0.0f && alphaMap) glBindTexture(GL_TEXTURE_2D, alphaMap->gl);
+            if (cmd.material.doubleSided) glDisable(GL_CULL_FACE);
+            else glEnable(GL_CULL_FACE);
             DrawMesh(*mesh);
             ++m_stats.shadowCasters;
         }
         glDisable(GL_POLYGON_OFFSET_FILL);
+        glEnable(GL_CULL_FACE);
     }
 
     // ---- Main pass -------------------------------------------------------------------
@@ -548,6 +595,16 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, m_shadowTex);
     m_pbrShader.SetInt("uShadowMap", 0);
+    m_pbrShader.SetInt("uBaseColorMap", 1);
+    m_pbrShader.SetInt("uMetalRoughMap", 2);
+    m_pbrShader.SetInt("uNormalMap", 3);
+    m_pbrShader.SetInt("uEmissiveMap", 4);
+    auto bindMap = [&](GLenum unit, TextureHandle handle) {
+        const Texture* t = m_textures.Get(handle);
+        if (!t) t = m_textures.Get(0);
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, t->gl);
+    };
 
     for (uint32_t index : m_visible) {
         const DrawCommand& cmd = m_commands[index];
@@ -558,8 +615,20 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         m_pbrShader.SetFloat("uRoughness", cmd.material.roughness);
         m_pbrShader.SetFloat("uChecker", cmd.material.checkerScale);
         m_pbrShader.SetVec3("uEmissive", cmd.material.emissive);
+        m_pbrShader.SetFloat("uAlpha", cmd.material.alpha);
+        m_pbrShader.SetFloat("uAlphaCutoff", cmd.material.alphaCutoff);
+        m_pbrShader.SetInt("uHasNormalMap", cmd.material.normalTexture ? 1 : 0);
+        m_pbrShader.SetFloat("uNormalScale", cmd.material.normalScale);
+        bindMap(1, cmd.material.baseColorTexture);
+        bindMap(2, cmd.material.metallicRoughnessTexture);
+        bindMap(3, cmd.material.normalTexture);
+        bindMap(4, cmd.material.emissiveTexture);
+        if (cmd.material.doubleSided) glDisable(GL_CULL_FACE);
+        else glEnable(GL_CULL_FACE);
         DrawMesh(*m_meshes.Get(cmd.mesh));
     }
+
+    glActiveTexture(GL_TEXTURE0);
 
     // ---- Sky (drawn last at far depth, only where nothing was rendered) ----------------
     glDepthFunc(GL_LEQUAL);
