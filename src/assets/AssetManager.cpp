@@ -80,15 +80,24 @@ ModelHandle AssetManager::LoadModel(const std::string& path) {
     model.name = PathToUtf8(file.stem());
     model.bounds = data.bounds;
     model.triangles = data.TriangleCount();
+    model.rig = std::move(data.rig);
+    std::vector<std::shared_ptr<const std::vector<SkinInfluence>>> influences;
+    for (auto& w : data.influences) influences.push_back(std::make_shared<const std::vector<SkinInfluence>>(std::move(w)));
+    std::vector<glm::mat4> globals;
+    ComputeGlobals(model.rig, model.rig.RestPose(), globals);
+    std::vector<Vertex> skinned;
+    AABB unused;
     std::vector<MeshHandle> handles;
     for (size_t i = 0; i < data.meshes.size(); ++i) handles.push_back(m_renderer->Meshes().Add(std::format("{}#{}", key, i), data.meshes[i]));
     for (const ModelPart& p : data.parts) {
         Material mat = materials[p.material];
         const bool mirrored = glm::determinant(glm::mat3(p.transform)) < 0.0f;
         if (mirrored) mat.doubleSided = true; // mirrored transforms flip the triangle winding
-        model.parts.push_back({handles[p.mesh], mat, p.transform});
+        model.parts.push_back({handles[p.mesh], mat, p.transform, p.node, p.skin, p.skin >= 0 ? influences[p.mesh] : nullptr});
+        if (p.skin >= 0) // collision uses the rest pose
+            SkinMesh(model.rig.skins[static_cast<size_t>(p.skin)], globals, data.meshes[p.mesh].vertices, *influences[p.mesh], skinned, unused);
         const auto base = static_cast<uint32_t>(model.collisionVertices.size());
-        for (const Vertex& v : data.meshes[p.mesh].vertices)
+        for (const Vertex& v : p.skin >= 0 ? skinned : data.meshes[p.mesh].vertices)
             model.collisionVertices.push_back(glm::vec3(p.transform * glm::vec4(v.position, 1.0f)));
         const auto& idx = data.meshes[p.mesh].indices;
         for (size_t i = 0; i + 2 < idx.size(); i += 3) { // keep outward winding: Jolt meshes are one-sided
@@ -99,9 +108,37 @@ ModelHandle AssetManager::LoadModel(const std::string& path) {
     }
     const auto handle = static_cast<ModelHandle>(m_models.size());
     Log::Info("Model '{}': {} parts, {} triangles, {} materials, {} images", path, model.parts.size(), model.triangles, materials.size(), data.images.size());
+    if (!model.rig.Empty()) Log::Info("Model '{}': {} rig nodes, {} skins, {} clips", path, model.rig.nodes.size(), model.rig.skins.size(), model.rig.clips.size());
     m_models.push_back(std::move(model));
     m_modelByPath[key] = handle;
     return handle;
+}
+
+int AssetManager::LoadAnimations(ModelHandle handle, const std::string& path) {
+    if (handle >= m_models.size() || path.empty()) return -1;
+    Model& model = m_models[handle];
+    if (model.rig.Empty()) {
+        Log::Error("Animations '{}': model '{}' has no skeleton", path, model.name);
+        return -1;
+    }
+    const fs::path file = Resolve(path);
+    const std::string key = PathToUtf8(file);
+    if (model.animationFiles.contains(key)) return 0;
+    Rig source;
+    std::string error;
+    if (!ImportAnimations(file, source, error)) {
+        Log::Error("Animations '{}': {}", path, error);
+        return -1;
+    }
+    int matched = 0;
+    const int added = RetargetClips(source, model.rig, PathToUtf8(file.stem()), &matched);
+    if (added == 0) {
+        Log::Error("Animations '{}': no bone names in common with model '{}'", path, model.name);
+        return -1;
+    }
+    model.animationFiles.insert(key);
+    Log::Info("Animations '{}': {} clips added to '{}' ({} bones matched)", path, added, model.name, matched);
+    return added;
 }
 
 std::string AssetManager::Import(const fs::path& source, std::string& error) {
@@ -114,9 +151,16 @@ std::string AssetManager::Import(const fs::path& source, std::string& error) {
     switch (type) {
         case AssetType::Model: {
             ModelData d;
-            if (!ImportModel(source, d, error)) return {};
-            deps = d.dependencies;
-            folder = fs::path("models") / source.stem();
+            Rig clips;
+            if (ImportModel(source, d, error)) {
+                deps = d.dependencies;
+                folder = fs::path("models") / source.stem();
+            } else {
+                std::string ignored; // a file with clips but no mesh is an animation file
+                if (!ImportAnimations(source, clips, ignored, &deps)) return {};
+                error.clear();
+                folder = fs::path("animations") / source.stem();
+            }
             break;
         }
         case AssetType::Image: {

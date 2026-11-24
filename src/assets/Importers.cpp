@@ -16,6 +16,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <tuple>
 
 namespace mage {
 
@@ -70,6 +71,8 @@ size_t ModelData::TriangleCount() const {
 
 namespace {
 
+const char* const kNoTriangles = "file contains no triangles";
+
 bool HasNonFinite(const glm::vec3& v) { return glm::any(glm::isnan(v)) || glm::any(glm::isinf(v)); }
 
 // A referenced file must stay inside the model's folder: no absolute paths, no "..".
@@ -98,21 +101,57 @@ void Sanitize(MeshData& m) {
 }
 
 bool Finish(ModelData& d, std::string& error) {
-    if (d.parts.empty()) { error = "file contains no triangles"; return false; }
+    d.influences.resize(d.meshes.size());
+    if (d.parts.empty()) { error = kNoTriangles; return false; }
+    std::vector<glm::mat4> globals;
+    ComputeGlobals(d.rig, d.rig.RestPose(), globals);
     glm::vec3 mn(std::numeric_limits<float>::max()), mx(-std::numeric_limits<float>::max());
-    for (const ModelPart& p : d.parts)
-        for (const Vertex& v : d.meshes[p.mesh].vertices) {
+    std::vector<Vertex> skinned;
+    AABB unused;
+    for (const ModelPart& p : d.parts) {
+        if (p.skin >= 0) SkinMesh(d.rig.skins[static_cast<size_t>(p.skin)], globals, d.meshes[p.mesh].vertices, d.influences[p.mesh], skinned, unused);
+        for (const Vertex& v : p.skin >= 0 ? skinned : d.meshes[p.mesh].vertices) {
             const glm::vec3 w = glm::vec3(p.transform * glm::vec4(v.position, 1.0f));
             if (HasNonFinite(w)) { error = "mesh contains NaN or infinite positions"; return false; }
             mn = glm::min(mn, w);
             mx = glm::max(mx, w);
         }
+    }
     d.bounds = AABB{mn, mx};
     return true;
 }
 
 void Warn(ModelData& d, const std::string& w) {
     if (std::find(d.warnings.begin(), d.warnings.end(), w) == d.warnings.end()) d.warnings.push_back(w);
+}
+
+// Keeps the four strongest influences and normalizes them. False = the vertex has no usable weight.
+bool PackInfluences(std::vector<std::pair<uint32_t, float>>& in, SkinInfluence& out) {
+    std::erase_if(in, [](const auto& p) { return !(p.second > 0.0f) || !std::isfinite(p.second); });
+    std::stable_sort(in.begin(), in.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (in.size() > 4) in.resize(4);
+    float sum = 0.0f;
+    for (const auto& p : in) sum += p.second;
+    if (!(sum > 1e-6f)) return false;
+    out = SkinInfluence{};
+    out.weights[0] = 0.0f;
+    for (size_t i = 0; i < in.size(); ++i) {
+        out.joints[i] = static_cast<uint16_t>(in[i].first);
+        out.weights[i] = in[i].second / sum;
+    }
+    return true;
+}
+
+std::string UniqueClipName(const Rig& rig, std::string name, size_t index) {
+    if (const size_t bar = name.find_last_of('|'); bar != std::string::npos && bar + 1 < name.size()) name = name.substr(bar + 1); // "Armature|Walk"
+    if (name.empty()) name = std::format("clip{}", index);
+    std::string unique = name;
+    for (int n = 2; rig.FindClip(unique) >= 0; ++n) unique = std::format("{}_{}", name, n);
+    return unique;
+}
+
+bool Finite(const JointPose& p) {
+    return !HasNonFinite(p.translation) && !HasNonFinite(p.scale) && std::isfinite(p.rotation.x + p.rotation.y + p.rotation.z + p.rotation.w);
 }
 
 // ============================================================================ glTF
@@ -142,13 +181,40 @@ const cgltf_accessor* FindAttribute(const cgltf_primitive& p, cgltf_attribute_ty
     return nullptr;
 }
 
-bool LoadPrimitive(const cgltf_primitive& p, MeshData& m, ModelData& d, std::string& error) {
+bool LoadPrimitive(const cgltf_primitive& p, const cgltf_skin* skin, MeshData& m, std::vector<SkinInfluence>& influences, ModelData& d, std::string& error) {
     if (p.has_draco_mesh_compression) { error = "Draco-compressed meshes are not supported"; return false; }
     const cgltf_accessor* pos = FindAttribute(p, cgltf_attribute_type_position);
     if (!pos || pos->count == 0) return true;
     const cgltf_accessor* nrm = FindAttribute(p, cgltf_attribute_type_normal);
     const cgltf_accessor* uv = FindAttribute(p, cgltf_attribute_type_texcoord);
-    if (FindAttribute(p, cgltf_attribute_type_joints)) Warn(d, "skinning is ignored (static pose)");
+    if (skin) {
+        influences.resize(pos->count);
+        std::vector<std::vector<std::pair<uint32_t, float>>> all(pos->count);
+        for (int set = 0; set < 4; ++set) {
+            const cgltf_accessor* joints = FindAttribute(p, cgltf_attribute_type_joints, set);
+            const cgltf_accessor* weights = FindAttribute(p, cgltf_attribute_type_weights, set);
+            if (!joints || !weights) {
+                if (set == 0) { error = "skinned mesh without joints or weights"; return false; }
+                break;
+            }
+            if (joints->count < pos->count || weights->count < pos->count) { error = "too few skin weights"; return false; }
+            if (set == 1) Warn(d, "only the 4 strongest bone influences per vertex are used");
+            for (size_t i = 0; i < pos->count; ++i) {
+                cgltf_uint j[4] = {};
+                float w[4] = {};
+                if (!cgltf_accessor_read_uint(joints, i, j, 4) || !cgltf_accessor_read_float(weights, i, w, 4)) { error = "unreadable skin weights"; return false; }
+                for (int k = 0; k < 4; ++k) {
+                    if (w[k] == 0.0f) continue;
+                    if (j[k] >= skin->joints_count) { error = "joint index out of range"; return false; }
+                    all[i].emplace_back(j[k], w[k]);
+                }
+            }
+        }
+        for (size_t i = 0; i < pos->count; ++i)
+            if (!PackInfluences(all[i], influences[i])) Warn(d, "vertices without skin weights follow the first bone");
+    } else if (FindAttribute(p, cgltf_attribute_type_joints)) {
+        Warn(d, "mesh has skin weights but no skin: it stays rigid");
+    }
     if (FindAttribute(p, cgltf_attribute_type_color)) Warn(d, "vertex colors are ignored");
     if (p.targets_count) Warn(d, "morph targets are ignored");
 
@@ -192,6 +258,128 @@ bool LoadPrimitive(const cgltf_primitive& p, MeshData& m, ModelData& d, std::str
     return true;
 }
 
+template <class T>
+bool ReadGltfKeys(const cgltf_animation_sampler& s, AnimationKeys<T>& out, std::string& error) {
+    constexpr int n = sizeof(T) / sizeof(float);
+    const bool cubic = s.interpolation == cgltf_interpolation_type_cubic_spline;
+    if (!s.input || !s.output || s.input->count == 0) return true;
+    if (s.output->count != s.input->count * (cubic ? 3 : 1)) { error = "animation key counts do not match"; return false; }
+    auto value = [&](size_t i, T& v) {
+        float f[4] = {};
+        if (!cgltf_accessor_read_float(s.output, i, f, n)) return false;
+        for (int k = 0; k < n; ++k) if (!std::isfinite(f[k])) return false;
+        if constexpr (n == 4) v = T(f[3], f[0], f[1], f[2]); // file order is x y z w
+        else v = T(f[0], f[1], f[2]);
+        return true;
+    };
+    auto push = [&](float t, T v) {
+        if constexpr (n == 4) {
+            const float len = glm::length(v);
+            v = len > 1e-8f ? v / len : T(1.0f, 0.0f, 0.0f, 0.0f);
+        }
+        out.times.push_back(t);
+        out.values.push_back(v);
+    };
+    out.step = s.interpolation == cgltf_interpolation_type_step;
+    std::vector<float> times(s.input->count);
+    for (size_t i = 0; i < times.size(); ++i)
+        if (!cgltf_accessor_read_float(s.input, i, &times[i], 1) || !std::isfinite(times[i]) || times[i] < 0.0f || (i && times[i] < times[i - 1])) {
+            error = "animation key times are invalid";
+            return false;
+        }
+    for (size_t i = 0; i < times.size(); ++i) {
+        T v{};
+        if (!value(cubic ? i * 3 + 1 : i, v)) { error = "animation values are invalid"; return false; }
+        push(times[i], v);
+        if (!cubic || i + 1 == times.size()) continue;
+        // Cubic splines are resampled to 60 Hz linear keys.
+        T out0{}, in1{}, v1{};
+        if (!value(i * 3 + 2, out0) || !value(i * 3 + 3, in1) || !value(i * 3 + 4, v1)) { error = "animation values are invalid"; return false; }
+        const float dt = times[i + 1] - times[i];
+        const int steps = std::clamp(static_cast<int>(std::ceil(std::min(dt, 60.0f) * 60.0f)), 1, 3600);
+        for (int k = 1; k < steps; ++k) {
+            const float u = static_cast<float>(k) / static_cast<float>(steps), u2 = u * u, u3 = u2 * u;
+            push(times[i] + dt * u, v * (2 * u3 - 3 * u2 + 1) + out0 * ((u3 - 2 * u2 + u) * dt) + v1 * (-2 * u3 + 3 * u2) + in1 * ((u3 - u2) * dt));
+        }
+    }
+    return true;
+}
+
+// Skeleton, skins and clips. nodeMap: glTF node -> rig node.
+bool LoadGltfRig(const cgltf_data& raw, ModelData& d, std::vector<int>& nodeMap, std::string& error) {
+    nodeMap.assign(raw.nodes_count, -1);
+    if (raw.skins_count == 0 && raw.animations_count == 0) return true;
+    Rig& rig = d.rig;
+    std::vector<const cgltf_node*> queue; // breadth first: parents before children
+    for (size_t i = 0; i < raw.nodes_count; ++i) if (!raw.nodes[i].parent) queue.push_back(&raw.nodes[i]);
+    for (size_t q = 0; q < queue.size(); ++q) {
+        const cgltf_node& n = *queue[q];
+        RigNode out;
+        out.name = n.name ? n.name : std::format("node{}", &n - raw.nodes);
+        out.parent = n.parent ? nodeMap[static_cast<size_t>(n.parent - raw.nodes)] : -1;
+        if (n.has_matrix) {
+            out.rest = JointPose::FromMatrix(glm::make_mat4(n.matrix));
+        } else {
+            if (n.has_translation) out.rest.translation = glm::make_vec3(n.translation);
+            if (n.has_rotation) out.rest.rotation = glm::quat(n.rotation[3], n.rotation[0], n.rotation[1], n.rotation[2]);
+            if (n.has_scale) out.rest.scale = glm::make_vec3(n.scale);
+            const float len = glm::length(out.rest.rotation);
+            out.rest.rotation = len > 1e-8f ? out.rest.rotation / len : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        }
+        if (!Finite(out.rest)) { error = "node transform is not finite"; return false; }
+        nodeMap[static_cast<size_t>(&n - raw.nodes)] = static_cast<int>(rig.nodes.size());
+        rig.nodes.push_back(std::move(out));
+        for (size_t i = 0; i < n.children_count; ++i) queue.push_back(n.children[i]);
+    }
+    for (size_t i = 0; i < raw.skins_count; ++i) {
+        const cgltf_skin& s = raw.skins[i];
+        if (s.joints_count == 0 || s.joints_count > 65535) { error = "skin has an invalid number of joints"; return false; }
+        const cgltf_accessor* ibm = s.inverse_bind_matrices;
+        if (ibm && (ibm->count < s.joints_count || ibm->type != cgltf_type_mat4)) { error = "skin has too few inverse bind matrices"; return false; }
+        Skin out;
+        for (size_t j = 0; j < s.joints_count; ++j) {
+            const int node = nodeMap[static_cast<size_t>(s.joints[j] - raw.nodes)];
+            if (node < 0) { error = "skin joint is not part of the node hierarchy"; return false; }
+            float m[16];
+            glm::mat4 bind(1.0f);
+            if (ibm) {
+                if (!cgltf_accessor_read_float(ibm, j, m, 16)) { error = "unreadable inverse bind matrices"; return false; }
+                bind = glm::make_mat4(m);
+            }
+            out.nodes.push_back(node);
+            out.inverseBind.push_back(bind);
+        }
+        rig.skins.push_back(std::move(out));
+    }
+    for (size_t i = 0; i < raw.animations_count; ++i) {
+        const cgltf_animation& a = raw.animations[i];
+        AnimationClip clip;
+        clip.name = UniqueClipName(rig, a.name ? a.name : "", i);
+        std::map<int, size_t> tracks;
+        for (size_t c = 0; c < a.channels_count; ++c) {
+            const cgltf_animation_channel& ch = a.channels[c];
+            if (!ch.target_node || !ch.sampler) continue;
+            const int node = nodeMap[static_cast<size_t>(ch.target_node - raw.nodes)];
+            if (node < 0) continue;
+            if (ch.target_path == cgltf_animation_path_type_weights) { Warn(d, "morph target animation is ignored"); continue; }
+            auto [it, isNew] = tracks.emplace(node, clip.tracks.size());
+            if (isNew) {
+                clip.tracks.emplace_back();
+                clip.tracks.back().node = node;
+            }
+            AnimationTrack& t = clip.tracks[it->second];
+            bool ok = true;
+            if (ch.target_path == cgltf_animation_path_type_translation && t.translation.times.empty()) ok = ReadGltfKeys(*ch.sampler, t.translation, error);
+            else if (ch.target_path == cgltf_animation_path_type_rotation && t.rotation.times.empty()) ok = ReadGltfKeys(*ch.sampler, t.rotation, error);
+            else if (ch.target_path == cgltf_animation_path_type_scale && t.scale.times.empty()) ok = ReadGltfKeys(*ch.sampler, t.scale, error);
+            if (!ok) return false;
+        }
+        FinalizeClip(clip);
+        if (!clip.tracks.empty()) rig.clips.push_back(std::move(clip));
+    }
+    return true;
+}
+
 bool ImportGltf(const fs::path& file, ModelData& d, std::string& error) {
     cgltf_options options{};
     options.file.read = ReadCallback;
@@ -229,6 +417,9 @@ bool ImportGltf(const fs::path& file, ModelData& d, std::string& error) {
         error = std::format("failed glTF validation (cgltf error {})", static_cast<int>(r));
         return false;
     }
+
+    std::vector<int> nodeMap;
+    if (!LoadGltfRig(*raw, d, nodeMap, error)) return false;
 
     for (size_t i = 0; i < raw->images_count; ++i) {
         const cgltf_image& img = raw->images[i];
@@ -310,25 +501,35 @@ bool ImportGltf(const fs::path& file, ModelData& d, std::string& error) {
         return static_cast<uint32_t>(defaultMaterial);
     };
 
-    std::map<const cgltf_primitive*, int> loaded;
+    std::map<std::pair<const cgltf_primitive*, const cgltf_skin*>, int> loaded;
     auto addNode = [&](const cgltf_node& node) -> bool {
         if (!node.mesh) return true;
         float world[16];
         cgltf_node_transform_world(&node, world);
         for (size_t i = 0; i < node.mesh->primitives_count; ++i) {
             const cgltf_primitive& prim = node.mesh->primitives[i];
-            auto it = loaded.find(&prim);
+            const cgltf_skin* skin = node.skin;
+            auto it = loaded.find({&prim, skin});
             if (it == loaded.end()) {
                 MeshData mesh;
-                if (!LoadPrimitive(prim, mesh, d, error)) return false;
+                std::vector<SkinInfluence> influences;
+                if (!LoadPrimitive(prim, skin, mesh, influences, d, error)) return false;
                 int index = -1;
                 if (!mesh.indices.empty()) {
                     index = static_cast<int>(d.meshes.size());
                     d.meshes.push_back(std::move(mesh));
+                    d.influences.push_back(std::move(influences));
                 }
-                it = loaded.emplace(&prim, index).first;
+                it = loaded.emplace(std::make_pair(&prim, skin), index).first;
             }
-            if (it->second >= 0) d.parts.push_back({static_cast<uint32_t>(it->second), materialIndex(prim.material), glm::make_mat4(world)});
+            if (it->second < 0) continue;
+            ModelPart part;
+            part.mesh = static_cast<uint32_t>(it->second);
+            part.material = materialIndex(prim.material);
+            part.node = nodeMap[static_cast<size_t>(&node - raw->nodes)];
+            part.skin = skin ? static_cast<int>(skin - raw->skins) : -1;
+            if (!skin) part.transform = glm::make_mat4(world); // skinned meshes ignore their own node
+            d.parts.push_back(part);
         }
         return true;
     };
@@ -343,7 +544,6 @@ bool ImportGltf(const fs::path& file, ModelData& d, std::string& error) {
         if (!addNode(*n)) return false;
         for (size_t i = 0; i < n->children_count; ++i) stack.push_back(n->children[i]);
     }
-    if (raw->animations_count) Warn(d, "animations are ignored");
     return Finish(d, error);
 }
 
@@ -377,7 +577,8 @@ bool ImportUfbx(const fs::path& file, ModelData& d, std::string& error) {
     opts.target_unit_meters = 1.0f;
     opts.generate_missing_normals = true;
     opts.obj_search_mtl_by_filename = true;
-    opts.ignore_animation = true;
+    opts.geometry_transform_handling = UFBX_GEOMETRY_TRANSFORM_HANDLING_HELPER_NODES;
+    opts.inherit_mode_handling = UFBX_INHERIT_MODE_HANDLING_HELPER_NODES;
     opts.load_external_files = true;
     opts.ignore_missing_external_files = true;
     opts.open_main_file_with_default = true;
@@ -457,21 +658,105 @@ bool ImportUfbx(const fs::path& file, ModelData& d, std::string& error) {
         return index;
     };
 
-    std::map<std::pair<const ufbx_mesh*, size_t>, int> loaded;
+    // Skeleton and clips.
+    std::vector<int> nodeMap(scene->nodes.count, -1);
+    bool hasRig = scene->skin_deformers.count > 0;
+    std::vector<std::pair<std::string, ufbx_baked_anim*>> baked;
+    struct BakedGuard { std::vector<std::pair<std::string, ufbx_baked_anim*>>& b; ~BakedGuard() { for (auto& p : b) ufbx_free_baked_anim(p.second); } } bakedGuard{baked};
+    for (size_t i = 0; i < scene->anim_stacks.count; ++i) {
+        const ufbx_anim_stack* stack = scene->anim_stacks.data[i];
+        ufbx_bake_opts bake{};
+        bake.trim_start_time = true;
+        ufbx_error be;
+        ufbx_baked_anim* anim = ufbx_bake_anim(scene, stack->anim, &bake, &be);
+        if (!anim) { Warn(d, "animation could not be read: " + std::string(be.description.data, be.description.length)); continue; }
+        baked.emplace_back(std::string(stack->name.data, stack->name.length), anim);
+        if (anim->nodes.count > 0 && anim->playback_duration > 0.0) hasRig = true;
+    }
+    if (hasRig) {
+        std::vector<const ufbx_node*> order(scene->nodes.data, scene->nodes.data + scene->nodes.count);
+        std::stable_sort(order.begin(), order.end(), [](const ufbx_node* a, const ufbx_node* b) { return a->node_depth < b->node_depth; });
+        for (const ufbx_node* n : order) {
+            RigNode out;
+            out.name = std::string(n->name.data, n->name.length);
+            out.parent = n->parent ? nodeMap[n->parent->typed_id] : -1;
+            const ufbx_transform& t = n->local_transform;
+            out.rest.translation = glm::vec3(t.translation.x, t.translation.y, t.translation.z);
+            out.rest.rotation = glm::normalize(glm::quat(static_cast<float>(t.rotation.w), static_cast<float>(t.rotation.x), static_cast<float>(t.rotation.y), static_cast<float>(t.rotation.z)));
+            out.rest.scale = glm::vec3(t.scale.x, t.scale.y, t.scale.z);
+            if (!Finite(out.rest)) { error = "node transform is not finite"; return false; }
+            nodeMap[n->typed_id] = static_cast<int>(d.rig.nodes.size());
+            d.rig.nodes.push_back(std::move(out));
+        }
+        for (size_t i = 0; i < baked.size(); ++i) {
+            const ufbx_baked_anim& anim = *baked[i].second;
+            AnimationClip clip;
+            clip.name = UniqueClipName(d.rig, baked[i].first, i);
+            for (size_t n = 0; n < anim.nodes.count; ++n) {
+                const ufbx_baked_node& bn = anim.nodes.data[n];
+                AnimationTrack t;
+                t.node = nodeMap[bn.typed_id];
+                auto vec = [](const ufbx_baked_vec3_list& keys, AnimationKeys<glm::vec3>& out) {
+                    for (size_t k = 0; k < keys.count; ++k) {
+                        const glm::vec3 v(keys.data[k].value.x, keys.data[k].value.y, keys.data[k].value.z);
+                        if (HasNonFinite(v)) continue;
+                        out.times.push_back(static_cast<float>(keys.data[k].time));
+                        out.values.push_back(v);
+                    }
+                };
+                vec(bn.translation_keys, t.translation);
+                vec(bn.scale_keys, t.scale);
+                for (size_t k = 0; k < bn.rotation_keys.count; ++k) {
+                    const ufbx_quat& q = bn.rotation_keys.data[k].value;
+                    const glm::quat r(static_cast<float>(q.w), static_cast<float>(q.x), static_cast<float>(q.y), static_cast<float>(q.z));
+                    const float len = glm::length(r);
+                    if (!std::isfinite(len) || len < 1e-8f) continue;
+                    t.rotation.times.push_back(static_cast<float>(bn.rotation_keys.data[k].time));
+                    t.rotation.values.push_back(r / len);
+                }
+                clip.tracks.push_back(std::move(t));
+            }
+            FinalizeClip(clip);
+            if (clip.tracks.empty() || anim.playback_duration <= 0.0) continue;
+            clip.duration = static_cast<float>(anim.playback_duration);
+            d.rig.clips.push_back(std::move(clip));
+        }
+    }
+
+    std::map<std::tuple<const ufbx_mesh*, size_t, const ufbx_node*>, std::pair<int, int>> loaded; // -> mesh, skin
     for (size_t n = 0; n < scene->nodes.count; ++n) {
         const ufbx_node* node = scene->nodes.data[n];
         const ufbx_mesh* mesh = node->mesh;
         if (!mesh || !node->visible) continue;
-        if (mesh->skin_deformers.count) Warn(d, "skinning is ignored (static pose)");
+        const ufbx_skin_deformer* deformer = mesh->skin_deformers.count ? mesh->skin_deformers.data[0] : nullptr;
+        if (deformer && (deformer->clusters.count == 0 || deformer->clusters.count > 65534)) deformer = nullptr;
+        if (mesh->skin_deformers.count > 1) Warn(d, "only the first skin of a mesh is used");
+        int skinIndex = -1;
+        if (deformer) {
+            Skin skin;
+            for (size_t c = 0; c < deformer->clusters.count; ++c) {
+                const ufbx_skin_cluster* cluster = deformer->clusters.data[c];
+                const ufbx_node* bone = cluster->bone_node ? cluster->bone_node : node;
+                skin.nodes.push_back(nodeMap[bone->typed_id]);
+                skin.inverseBind.push_back(ToGlm(cluster->bone_node ? cluster->geometry_to_bone : node->geometry_to_node));
+            }
+            // Vertices without weights follow the mesh node.
+            skin.nodes.push_back(nodeMap[node->typed_id]);
+            skin.inverseBind.push_back(ToGlm(node->geometry_to_node));
+            skinIndex = static_cast<int>(d.rig.skins.size());
+            d.rig.skins.push_back(std::move(skin));
+            if (deformer->max_weights_per_vertex > 4) Warn(d, "only the 4 strongest bone influences per vertex are used");
+        }
         if (mesh->blend_deformers.count) Warn(d, "blend shapes are ignored");
         std::vector<uint32_t> tri(std::max<size_t>(mesh->max_face_triangles * 3, 3));
         for (size_t pi = 0; pi < mesh->material_parts.count; ++pi) {
             const ufbx_mesh_part& part = mesh->material_parts.data[pi];
             if (part.num_triangles == 0) continue;
-            auto key = std::make_pair(mesh, pi);
+            auto key = std::make_tuple(mesh, pi, deformer ? node : nullptr);
             auto it = loaded.find(key);
             if (it == loaded.end()) {
                 MeshData out;
+                std::vector<SkinInfluence> influences;
                 out.vertices.reserve(part.num_triangles * 3);
                 for (size_t f = 0; f < part.face_indices.count; ++f) {
                     const ufbx_face face = mesh->faces.data[part.face_indices.data[f]];
@@ -490,26 +775,50 @@ bool ImportUfbx(const fs::path& file, ModelData& d, std::string& error) {
                             v.uv = glm::vec2(q.x, 1.0 - q.y); // FBX/OBJ put V=0 at the bottom
                         }
                         out.vertices.push_back(v);
+                        if (!deformer) continue;
+                        std::vector<std::pair<uint32_t, float>> all;
+                        const uint32_t vi = mesh->vertex_indices.data[ix];
+                        if (vi < deformer->vertices.count) {
+                            const ufbx_skin_vertex& sv = deformer->vertices.data[vi];
+                            for (uint32_t k = 0; k < sv.num_weights; ++k) {
+                                const ufbx_skin_weight& sw = deformer->weights.data[sv.weight_begin + k];
+                                all.emplace_back(sw.cluster_index, static_cast<float>(sw.weight));
+                            }
+                        }
+                        SkinInfluence inf;
+                        if (!PackInfluences(all, inf)) inf.joints[0] = static_cast<uint16_t>(deformer->clusters.count);
+                        influences.push_back(inf);
                     }
                 }
                 std::vector<uint32_t> indices(out.vertices.size());
-                ufbx_vertex_stream stream{out.vertices.data(), out.vertices.size(), sizeof(Vertex)};
+                ufbx_vertex_stream streams[2] = {{out.vertices.data(), out.vertices.size(), sizeof(Vertex)},
+                                                 {influences.data(), influences.size(), sizeof(SkinInfluence)}};
                 ufbx_error ie;
-                const size_t unique = ufbx_generate_indices(&stream, 1, indices.data(), indices.size(), nullptr, &ie);
+                const size_t unique = ufbx_generate_indices(streams, deformer ? 2 : 1, indices.data(), indices.size(), nullptr, &ie);
                 int index = -1;
                 if (unique > 0) {
                     out.vertices.resize(unique);
+                    if (deformer) influences.resize(unique);
                     out.indices = std::move(indices);
                     Sanitize(out);
                     index = static_cast<int>(d.meshes.size());
                     d.meshes.push_back(std::move(out));
+                    d.influences.push_back(std::move(influences));
                 }
-                it = loaded.emplace(key, index).first;
+                it = loaded.emplace(key, std::make_pair(index, skinIndex)).first;
             }
-            if (it->second < 0) continue;
+            if (it->second.first < 0) continue;
             const ufbx_material* mat = pi < node->materials.count ? node->materials.data[pi]
                                      : (pi < mesh->materials.count ? mesh->materials.data[pi] : nullptr);
-            d.parts.push_back({static_cast<uint32_t>(it->second), materialIndex(mat), ToGlm(node->geometry_to_world)});
+            ModelPart mp;
+            mp.mesh = static_cast<uint32_t>(it->second.first);
+            mp.material = materialIndex(mat);
+            mp.skin = it->second.second;
+            if (mp.skin < 0) {
+                mp.transform = ToGlm(node->geometry_to_world);
+                mp.node = nodeMap[node->typed_id];
+            }
+            d.parts.push_back(mp);
         }
     }
     // OBJ material libraries have to travel with the model.
@@ -520,7 +829,7 @@ bool ImportUfbx(const fs::path& file, ModelData& d, std::string& error) {
 } // namespace
 
 // ============================================================================ public API
-bool ImportModel(const fs::path& file, ModelData& out, std::string& error) {
+static bool LoadFile(const fs::path& file, ModelData& out, std::string& error) {
     out = ModelData{};
     error.clear();
     std::error_code ec;
@@ -528,9 +837,26 @@ bool ImportModel(const fs::path& file, ModelData& out, std::string& error) {
     if (DetectAssetType(file) != AssetType::Model) { error = "unsupported model format"; return false; }
     std::string ext = PathToUtf8(file.extension());
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool ok = (ext == ".gltf" || ext == ".glb") ? ImportGltf(file, out, error) : ImportUfbx(file, out, error);
+    return (ext == ".gltf" || ext == ".glb") ? ImportGltf(file, out, error) : ImportUfbx(file, out, error);
+}
+
+bool ImportModel(const fs::path& file, ModelData& out, std::string& error) {
+    const bool ok = LoadFile(file, out, error);
     if (!ok) out = ModelData{};
     return ok;
+}
+
+bool ImportAnimations(const fs::path& file, Rig& out, std::string& error, std::vector<fs::path>* dependencies) {
+    ModelData d;
+    // A file without triangles is fine here: everything else was read before that check.
+    const bool ok = LoadFile(file, d, error);
+    out = Rig{};
+    if (!ok && error != kNoTriangles) return false;
+    error.clear();
+    if (d.rig.clips.empty()) { error = "file contains no animations"; return false; }
+    if (dependencies) *dependencies = std::move(d.dependencies);
+    out = std::move(d.rig);
+    return true;
 }
 
 bool DecodeImage(const uint8_t* data, size_t size, ImageData& out, std::string& error) {

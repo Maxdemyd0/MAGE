@@ -19,6 +19,35 @@ namespace Mage
             InternalCalls.SetEntityTexture(entity, (int)slot, path);
     }
 
+    /// <summary>Clips of models that have a skeleton or animated parts.</summary>
+    public static class Animator
+    {
+        /// <summary>Crossfades to a clip. Repeating the call for a looping clip does not restart it.</summary>
+        /// <returns>False if the entity is not animated or has no such clip.</returns>
+        public static bool Play(uint entity, string clip, float fade = 0.2f, bool loop = true, float speed = 1f) =>
+            InternalCalls.PlayAnimation(entity, clip, fade, loop, speed);
+
+        /// <summary>Freezes the current pose.</summary>
+        public static void Stop(uint entity) => InternalCalls.StopAnimation(entity);
+
+        /// <summary>Adds the clips of another file made for the same skeleton (for example a Mixamo animation).</summary>
+        /// <returns>Number of clips added, -1 on failure.</returns>
+        public static int LoadClips(uint entity, string path) => InternalCalls.LoadAnimations(entity, path);
+
+        /// <summary>False when stopped, when a one-shot clip has ended, or when the entity is not animated.</summary>
+        public static bool IsPlaying(uint entity) => InternalCalls.AnimationState(entity, out _, out _) == 1;
+
+        /// <summary>Playback position and length in seconds.</summary>
+        public static bool GetTime(uint entity, out float time, out float duration) => InternalCalls.AnimationState(entity, out time, out duration) >= 0;
+
+        /// <param name="inPlace">Remove the horizontal travel of clips, so that the script moves the character.</param>
+        public static void Configure(uint entity, float speed, bool inPlace) => InternalCalls.SetAnimation(entity, speed, inPlace);
+
+        /// <summary>World position and rotation of a bone, for attaching objects or placing effects.</summary>
+        public static bool GetBone(uint entity, string bone, out Vector3 position, out Quaternion rotation) =>
+            InternalCalls.BonePosition(entity, bone, out position, out rotation);
+    }
+
     /// <summary>Sound playback (.wav .mp3 .flac .ogg).</summary>
     public static class Audio
     {

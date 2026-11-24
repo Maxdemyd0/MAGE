@@ -369,6 +369,8 @@ bool SectorStreamer::ParseSectorJson(const std::string& text, SectorData& out, s
                 d.ior = e.value("ior", 1.5f);
                 d.model = e.value("model", std::string());
                 d.texture = e.value("texture", std::string());
+                d.animation = e.value("animation", std::string());
+                d.animationFiles = e.value("animationFiles", std::vector<std::string>());
                 d.physics = ParsePhysics(e.value("physics", std::string("static")));
                 d.mass = e.value("mass", 0.0f);
                 out.entities.push_back(std::move(d));
@@ -391,6 +393,7 @@ std::string SectorStreamer::SectorToJson(const SectorData& data) {
                             {"color", WriteVec3(d.color)}, {"emissive", WriteVec3(d.emissive)},
                             {"metallic", d.metallic}, {"roughness", d.roughness}, {"clearcoat", d.clearcoat},
                             {"transmission", d.transmission}, {"ior", d.ior}, {"model", d.model}, {"texture", d.texture},
+                            {"animation", d.animation}, {"animationFiles", d.animationFiles},
                             {"physics", PhysicsName(d.physics)}, {"mass", d.mass}});
     }
     root["entities"] = std::move(entities);

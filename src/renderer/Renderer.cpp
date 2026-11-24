@@ -326,6 +326,11 @@ void Renderer::Shutdown() {
     if (m_pathTracer) m_pathTracer->Shutdown();
     m_pathTracer.reset();
     m_meshes.Destroy();
+    for (auto& [id, b] : m_skinnedBuffers) {
+        glDeleteBuffers(1, &b.vbo);
+        glDeleteVertexArrays(1, &b.vao);
+    }
+    m_skinnedBuffers.clear();
     m_textures.Destroy();
     DestroyRenderTarget(m_viewport);
     if (m_shadowTex) glDeleteTextures(1, &m_shadowTex);
@@ -415,10 +420,21 @@ void Renderer::BeginFrame(const Camera& camera, int width, int height) {
     m_commands.clear();
     m_lines.clear();
     m_stats = RenderStats{};
+    ++m_frameIndex;
+    for (auto it = m_skinnedBuffers.begin(); it != m_skinnedBuffers.end();) {
+        if (m_frameIndex - it->second.lastUsed > 600) {
+            glDeleteBuffers(1, &it->second.vbo);
+            glDeleteVertexArrays(1, &it->second.vao);
+            it = m_skinnedBuffers.erase(it);
+        } else ++it;
+    }
 }
 
 void Renderer::Submit(const DrawCommand& command) {
-    if (m_meshes.Get(command.mesh)) m_commands.push_back(command);
+    const Mesh* mesh = m_meshes.Get(command.mesh);
+    if (!mesh) return;
+    if (command.skinned && (!command.skinned->id || !command.skinned->vertices || command.skinned->vertices->empty())) return;
+    m_commands.push_back(command);
 }
 
 void Renderer::DrawLine(const glm::vec3& a, const glm::vec3& b, const glm::vec3& color) {
@@ -460,8 +476,29 @@ glm::mat4 Renderer::ComputeLightViewProjection() const {
     return proj * view;
 }
 
-void Renderer::DrawMesh(const Mesh& mesh) const {
-    glBindVertexArray(mesh.vao);
+void Renderer::DrawMesh(const DrawCommand& cmd) {
+    const Mesh& mesh = *m_meshes.Get(cmd.mesh);
+    if (!cmd.skinned) {
+        glBindVertexArray(mesh.vao);
+    } else {
+        SkinnedBuffer& b = m_skinnedBuffers[cmd.skinned->id];
+        if (!b.vao) {
+            glGenVertexArrays(1, &b.vao);
+            glBindVertexArray(b.vao);
+            glGenBuffers(1, &b.vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ibo);
+            SetVertexLayout();
+        }
+        glBindVertexArray(b.vao);
+        if (b.version != cmd.skinned->version) {
+            const auto& v = *cmd.skinned->vertices;
+            glBindBuffer(GL_ARRAY_BUFFER, b.vbo);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(v.size() * sizeof(Vertex)), v.data(), GL_STREAM_DRAW);
+            b.version = cmd.skinned->version;
+        }
+        b.lastUsed = m_frameIndex;
+    }
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indexCount), GL_UNSIGNED_INT, nullptr);
 }
 
@@ -490,7 +527,7 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         const DrawCommand& cmd = m_commands[i];
         const Mesh* mesh = m_meshes.Get(cmd.mesh);
         if (frustumCulling) {
-            const AABB world = mesh->bounds.Transformed(cmd.model);
+            const AABB world = cmd.Bounds(*mesh).Transformed(cmd.model);
             if (!m_frustum.IntersectsAABB(world.min, world.max)) {
                 ++m_stats.culled;
                 continue;
@@ -550,7 +587,7 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         for (const DrawCommand& cmd : m_commands) {
             if (!cmd.castShadows) continue;
             const Mesh* mesh = m_meshes.Get(cmd.mesh);
-            const AABB world = mesh->bounds.Transformed(cmd.model);
+            const AABB world = cmd.Bounds(*mesh).Transformed(cmd.model);
             if (!lightFrustum.IntersectsAABB(world.min, world.max)) continue;
             m_shadowShader.SetMat4("uModel", cmd.model);
             m_shadowShader.SetFloat("uAlpha", cmd.material.alpha);
@@ -559,7 +596,7 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
             if (cmd.material.alphaCutoff > 0.0f && alphaMap) glBindTexture(GL_TEXTURE_2D, alphaMap->gl);
             if (cmd.material.doubleSided) glDisable(GL_CULL_FACE);
             else glEnable(GL_CULL_FACE);
-            DrawMesh(*mesh);
+            DrawMesh(cmd);
             ++m_stats.shadowCasters;
         }
         glDisable(GL_POLYGON_OFFSET_FILL);
@@ -625,7 +662,7 @@ void Renderer::EndFrame(uint32_t targetFramebuffer) {
         bindMap(4, cmd.material.emissiveTexture);
         if (cmd.material.doubleSided) glDisable(GL_CULL_FACE);
         else glEnable(GL_CULL_FACE);
-        DrawMesh(*m_meshes.Get(cmd.mesh));
+        DrawMesh(cmd);
     }
 
     glActiveTexture(GL_TEXTURE0);

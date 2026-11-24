@@ -72,6 +72,25 @@ struct ModelComponent {
     bool castShadows = true;
 };
 
+// Plays clips on an imported model with a skeleton or animated nodes. Start clips with PlayClip().
+struct AnimatorComponent {
+    int clip = -1;                   // into Model::rig.clips, -1 = rest pose
+    float time = 0.0f;               // seconds
+    float speed = 1.0f;              // negative plays backwards
+    bool loop = true;
+    bool playing = false;
+    bool inPlace = false;            // remove the clip's horizontal travel
+    // Crossfade state.
+    int prevClip = -1;
+    float prevTime = 0.0f;
+    float prevSpeed = 1.0f;
+    bool prevLoop = true;
+    bool fromSnapshot = false;
+    bool captureSnapshot = false;
+    float fadeTime = 0.0f;
+    float fadeDuration = 0.0f;
+};
+
 enum class BodyMotion : uint8_t { Static, Kinematic, Dynamic };
 
 struct RigidBodyComponent {

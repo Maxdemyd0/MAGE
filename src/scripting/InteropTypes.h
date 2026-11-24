@@ -11,7 +11,7 @@
 
 namespace mage::interop {
 
-inline constexpr uint32_t kInteropVersion = 2;
+inline constexpr uint32_t kInteropVersion = 3;
 
 struct NVec3 { float x, y, z; };
 struct NQuat { float x, y, z, w; };
@@ -53,6 +53,12 @@ using FnPlayAudio          = uint32_t (*)(const char* utf8Path, float volume, fl
 using FnStopAudio          = void (*)(uint32_t sound);
 using FnLoadFont           = int32_t (*)(const char* utf8Path, float size);
 using FnDrawLabel          = void (*)(const char* utf8Text, float x, float y, float size, uint32_t rgba, int32_t font);
+using FnPlayAnimation      = int32_t (*)(uint32_t entity, const char* utf8Clip, float fade, int32_t loop, float speed);
+using FnStopAnimation      = void (*)(uint32_t entity);   // freezes the current pose
+using FnLoadAnimations     = int32_t (*)(uint32_t entity, const char* utf8Path);
+using FnAnimationState     = int32_t (*)(uint32_t entity, float* time, float* duration); // 1 playing, 0 stopped / finished, -1 no animator
+using FnSetAnimation       = void (*)(uint32_t entity, float speed, int32_t inPlace);
+using FnBonePosition       = int32_t (*)(uint32_t entity, const char* utf8Bone, NVec3* position, NQuat* rotation);
 
 struct NativeBindings {
     uint32_t structSize;
@@ -74,6 +80,12 @@ struct NativeBindings {
     FnStopAudio StopAudio;
     FnLoadFont LoadFont;
     FnDrawLabel DrawLabel;
+    FnPlayAnimation PlayAnimation;
+    FnStopAnimation StopAnimation;
+    FnLoadAnimations LoadAnimations;
+    FnAnimationState AnimationState;
+    FnSetAnimation SetAnimation;
+    FnBonePosition BonePosition;
 };
 
 // ---- Managed entry points filled in by C# ScriptEngine.Initialize ----
@@ -92,7 +104,7 @@ static_assert(sizeof(NVec3) == 12);
 static_assert(sizeof(NQuat) == 16);
 static_assert(sizeof(NRaycastHit) == 32);
 static_assert(sizeof(NVehicleState) == 20);
-static_assert(sizeof(NativeBindings) == 8 + 17 * sizeof(void*));
+static_assert(sizeof(NativeBindings) == 8 + 23 * sizeof(void*));
 static_assert(sizeof(ManagedCallbacks) == 5 * sizeof(void*));
 
 } // namespace mage::interop

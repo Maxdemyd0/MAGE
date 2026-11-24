@@ -35,6 +35,7 @@ class SectorStreamer;
 class ScriptHost;
 class AssetManager;
 class AudioEngine;
+class AnimationSystem;
 struct SectorData;
 struct SectorCoord;
 struct VehicleDesc;
@@ -63,6 +64,8 @@ struct SpawnDesc {
     std::string mesh = "cube";      // cube | sphere | cylinder | cone | plane
     std::string model;              // imported model file; replaces mesh + material when set
     std::string texture;            // base colour texture for the primitive
+    std::string animation;          // clip to loop; empty = the model's idle (or first) clip, "none" = rest pose
+    std::vector<std::string> animationFiles; // extra files with clips for the model's skeleton
     glm::vec3 position{0.0f};
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec3 scale{1.0f};
@@ -107,6 +110,7 @@ public:
     // Application hooks.
     std::function<void(float)> OnUpdate;        // variable rate, after interpolation
     std::function<void(float)> OnFixedUpdate;   // 60 Hz, before the physics step
+    std::function<void()> OnRender;             // after the scene is submitted (debug lines)
     std::function<void()> OnImGui;              // inside the ImGui frame
     std::function<void(const std::vector<std::filesystem::path>&)> OnFilesDropped;
 
@@ -134,6 +138,12 @@ public:
     Input& GetInput() { return m_input; }
     AssetManager& GetAssets() { return *m_assets; }
     AudioEngine& GetAudio() { return *m_audio; }
+    AnimationSystem& GetAnimation() { return *m_animation; }
+
+    // Animation by name. False if the entity has no skeleton or no such clip / bone.
+    bool PlayAnimation(Entity e, const std::string& clip, float fadeSeconds = 0.2f, bool loop = true, float speed = 1.0f);
+    int LoadAnimations(Entity e, const std::string& path); // clips added, -1 on failure
+    bool GetBoneTransform(Entity e, const std::string& bone, glm::mat4& world) const;
 
     // Fonts and on-screen text. A font becomes usable on the next frame; until then (and for
     // handle 0) the built-in font is used. Text lasts one frame: draw it from an update hook.
@@ -187,6 +197,7 @@ private:
     std::unique_ptr<ScriptHost> m_scripts;
     std::unique_ptr<AssetManager> m_assets;
     std::unique_ptr<AudioEngine> m_audio;
+    std::unique_ptr<AnimationSystem> m_animation;
     struct FontEntry { std::string key; std::filesystem::path file; float size; void* font = nullptr; };
     struct Label { std::string text; glm::vec2 position; float size; glm::vec4 color; int font; };
     std::vector<FontEntry> m_fonts;

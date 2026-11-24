@@ -47,7 +47,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Runtime flags
 
-`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--load-model <file>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
+`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--load-model <file>`, `--animation <clip>`, `--load-animations <file>`, `--model-count <n>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
 the real C++ -> C# -> Jolt path), `--quit-after <seconds>`, `--screenshot <file.bmp>`.
 
 Automated smoke test:
@@ -139,11 +139,32 @@ To add a gameplay script, derive from `Mage.Entity` in `scripting/GameScripts`, 
 Positions are relative to the sector centre. The default sector size is 96 m. `physics` is one of `static`, `dynamic` or `none`.
 The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
 
+### Characters and animation
+
+Models with a skeleton or animated nodes get an `AnimatorComponent` and start their `idle` clip (or the first one).
+Clips crossfade; interrupting a fade does not pop. Clips from other files of the same skeleton (for example Mixamo
+animations without skin) are matched by bone name and adjusted for size and root orientation.
+
+```csharp
+uint npc = Assets.SpawnModel("models/mannequin/mannequin.glb", position, rotation, Vector3.One);
+Animator.LoadClips(npc, "animations/dance/dance.fbx");
+Animator.Configure(npc, speed: 1f, inPlace: true);       // the script moves the character, not the clip
+Animator.Play(npc, "walk", fade: 0.25f);
+Animator.GetBone(npc, "RightHand", out Vector3 hand, out Quaternion grip);
+```
+
+Sector entities accept `"animation"` (a clip name, or `"none"`) and `"animationFiles"`. In the editor, select a character
+for clip, time, speed, skeleton display and, in the Assets panel, **Add clips**.
+
+Skinning uses linear blending with up to 4 bones per vertex, on worker threads. Both renderers share the result; the
+path tracer rebuilds a BLAS per deformed mesh. There is no state machine, additive layering, IK or ragdoll yet, and
+retargeting needs the same bone names and bone orientations. Physics shapes use the rest pose.
+
 ### Importing assets
 
 | Kind | Formats | Notes |
 | --- | --- | --- |
-| Models | `.gltf` `.glb` `.fbx` `.obj` | Static geometry, hierarchy, PBR materials and textures. Metres, Y up |
+| Models | `.gltf` `.glb` `.fbx` `.obj` | Hierarchy, PBR materials, textures, skeletons and animation clips. Metres, Y up |
 | Textures | `.png` `.jpg` `.tga` `.bmp` and other stb_image formats | Base color, metallic-roughness, normal, emissive |
 | Fonts | `.ttf` `.otf` | Latin, Greek, Cyrillic |
 | Sounds | `.wav` `.mp3` `.flac` `.ogg` | Flat or 3D |
@@ -160,9 +181,10 @@ Text.Draw("Hello", 20, 20, 32, 0xFFFFFFFF, font);   // every frame
 ```
 
 Sector entities accept `"model"` and `"texture"`. Static models collide with their exact triangles, dynamic ones with
-their convex hull. `tests/make_sample_model.py` regenerates the sample model.
+their convex hull. `tests/make_sample_model.py` and
+`tests/make_sample_character.py` regenerate the sample models.
 
-Not supported: skinning and animation, morph targets, Draco/meshopt compression, KTX2, vertex colors, a second UV set,
+Not supported: morph targets, Draco/meshopt compression, KTX2, vertex colors, a second UV set,
 and `KHR_texture_transform`. Blended transparency is approximated with a cut-out. FBX files with separate
 roughness/metalness maps use the plain values. The path tracer holds at most 1024 textures.
 

@@ -11,6 +11,8 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <unordered_map>
+#include <vector>
 
 #ifdef MAGE_HAS_VULKAN_RT
 #include "raytracing/VulkanContext.h"
@@ -70,6 +72,7 @@ struct GpuInstance {
     glm::vec4 surface;    // normal scale, alpha, alpha cutoff, -
 };
 static_assert(sizeof(GpuInstance) == 160);
+static_assert(sizeof(Vertex) == 32);
 
 struct GpuLight {
     uint32_t instance;
@@ -80,7 +83,8 @@ struct GpuLight {
 
 constexpr uint32_t kFlagStatic = 1u, kFlagReset = 2u, kFlagAccumulate = 4u;
 constexpr uint32_t kCameraAutoExposure = 1u, kCameraLightSampling = 2u, kCameraAerial = 4u;
-constexpr uint32_t kInstanceTransmissive = 1u, kInstanceEmissive = 2u, kInstanceMasked = 4u;
+constexpr uint32_t kInstanceTransmissive = 1u, kInstanceEmissive = 2u, kInstanceMasked = 4u, kInstanceSkinned = 8u;
+constexpr VkBufferUsageFlags kSkinnedVertexUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
 constexpr int kFramesInFlight = 2;
 constexpr int kBloomLevels = 6;
 constexpr VkDeviceSize kExposureBufferSize = 256 * 4 + 16;
@@ -148,6 +152,15 @@ struct FrameSlot {
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
     vk::AccelerationStructure tlas;
     vk::Buffer tlasScratch, instanceBuffer, instanceData, lights, ubo, readback, statsReadback;
+    // Skinned meshes: this frame's vertices and one BLAS per mesh instance.
+    struct SkinnedBlas {
+        vk::AccelerationStructure as;
+        VkDeviceSize scratchSize = 0;
+        uint32_t vertexCount = 0, primitives = 0;
+        uint64_t version = 0, lastUsed = 0;
+    };
+    std::unordered_map<uint64_t, SkinnedBlas> skinned;
+    vk::Buffer skinnedVertices, skinnedScratch;
     uint32_t instanceCapacity = 0;
     bool inFlight = false;
     uint64_t sequence = 0;          // submission order
@@ -169,6 +182,7 @@ struct PathTracer::Impl {
     vk::Buffer vertices, indices, meshTable;
     std::vector<vk::AccelerationStructure> blas;
     std::vector<uint32_t> meshTriangles;
+    std::vector<glm::uvec4> meshRanges; // firstIndex, vertexOffset, indexCount
     std::vector<glm::vec3> meshExtents;
 
     // Render targets shared by both frame slots (ordered on the single queue).
@@ -253,6 +267,7 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     add(22, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kBloomLevels);
     add(23, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBloomLevels);
     add(24, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, TextureLibrary::kMaxTextures);
+    add(25, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     lci.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -294,7 +309,7 @@ bool PathTracer::Impl::CreatePipelines(const std::filesystem::path& shaderDir) {
     }
 
     const VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, kFramesInFlight},
-                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6 * kFramesInFlight},
+                                          {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 * kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, (16 + 3 + kBloomLevels) * kFramesInFlight},
                                           {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, (1 + 3 + kBloomLevels + TextureLibrary::kMaxTextures) * kFramesInFlight}};
@@ -322,6 +337,7 @@ void PathTracer::Impl::DestroyGeometry() {
     for (auto& as : blas) ctx.DestroyAccelerationStructure(as);
     blas.clear();
     meshTriangles.clear();
+    meshRanges.clear();
     meshExtents.clear();
     for (vk::Buffer* b : {&vertices, &indices, &meshTable}) ctx.DestroyBuffer(*b);
 }
@@ -430,6 +446,7 @@ bool PathTracer::Impl::BuildGeometry(const MeshLibrary& meshes) {
     std::memcpy(indices.mapped, indexData.data(), indexData.size() * 4);
     std::memcpy(meshTable.mapped, table.data(), table.size() * sizeof(glm::uvec4));
 
+    meshRanges = table;
     blas.resize(meshCount);
     for (MeshHandle h = 0; h < meshCount; ++h) {
         const glm::uvec4& t = table[h];
@@ -528,12 +545,14 @@ void PathTracer::Impl::CreateSlot(FrameSlot& slot) {
     vkAllocateDescriptorSets(ctx.device, &dsai, &slot.descriptorSet);
     slot.ubo = ctx.CreateBuffer(sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, vk::MemoryKind::Upload);
     slot.statsReadback = ctx.CreateBuffer(16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, vk::MemoryKind::Readback);
+    slot.skinnedVertices = ctx.CreateBuffer(1 << 16, kSkinnedVertexUsage, vk::MemoryKind::Upload);
     EnsureInstanceCapacity(slot, 1024);
 }
 
 void PathTracer::Impl::DestroySlot(FrameSlot& slot) {
     ctx.DestroyAccelerationStructure(slot.tlas);
-    for (vk::Buffer* b : {&slot.tlasScratch, &slot.instanceBuffer, &slot.instanceData, &slot.lights, &slot.ubo, &slot.readback, &slot.statsReadback})
+    for (auto& [id, b] : slot.skinned) ctx.DestroyAccelerationStructure(b.as);
+    for (vk::Buffer* b : {&slot.skinnedVertices, &slot.skinnedScratch, &slot.tlasScratch, &slot.instanceBuffer, &slot.instanceData, &slot.lights, &slot.ubo, &slot.readback, &slot.statsReadback})
         ctx.DestroyBuffer(*b);
     if (slot.fence) vkDestroyFence(ctx.device, slot.fence, nullptr);
     if (slot.queries) vkDestroyQueryPool(ctx.device, slot.queries, nullptr);
@@ -581,22 +600,23 @@ void PathTracer::Impl::WriteSceneDescriptors(FrameSlot& slot) {
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     asWrite.accelerationStructureCount = 1;
     asWrite.pAccelerationStructures = &slot.tlas.handle;
-    const VkDescriptorBufferInfo bufferInfos[7] = {{vertices.buffer, 0, VK_WHOLE_SIZE},
+    const VkDescriptorBufferInfo bufferInfos[8] = {{vertices.buffer, 0, VK_WHOLE_SIZE},
                                                    {indices.buffer, 0, VK_WHOLE_SIZE},
                                                    {meshTable.buffer, 0, VK_WHOLE_SIZE},
                                                    {slot.instanceData.buffer, 0, VK_WHOLE_SIZE},
                                                    {slot.ubo.buffer, 0, sizeof(FrameUBO)},
                                                    {slot.lights.buffer, 0, VK_WHOLE_SIZE},
-                                                   {exposure.buffer, 0, VK_WHOLE_SIZE}};
-    const uint32_t bufferBindings[7] = {1, 2, 3, 4, 5, 16, 17};
-    VkWriteDescriptorSet writes[8] = {};
+                                                   {exposure.buffer, 0, VK_WHOLE_SIZE},
+                                                   {slot.skinnedVertices.buffer, 0, VK_WHOLE_SIZE}};
+    const uint32_t bufferBindings[8] = {1, 2, 3, 4, 5, 16, 17, 25};
+    VkWriteDescriptorSet writes[9] = {};
     writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &asWrite, slot.descriptorSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR};
-    for (uint32_t i = 0; i < 7; ++i) {
+    for (uint32_t i = 0; i < 8; ++i) {
         writes[i + 1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, slot.descriptorSet, bufferBindings[i], 0, 1,
                          bufferBindings[i] == 5 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
         writes[i + 1].pBufferInfo = &bufferInfos[i];
     }
-    vkUpdateDescriptorSets(ctx.device, 8, writes, 0, nullptr);
+    vkUpdateDescriptorSets(ctx.device, 9, writes, 0, nullptr);
 }
 
 void PathTracer::Impl::DestroyTargets() {
@@ -850,14 +870,82 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
 
     // ---- Instances (TLAS input + materials) and emissive light list ---------------------------
     s.EnsureInstanceCapacity(*slot, static_cast<uint32_t>(commands.size()));
+    // Skinned meshes: copy this frame's vertices and queue a BLAS build for everything that moved.
+    size_t skinnedCount = 0;
+    for (const DrawCommand& c : commands) if (c.skinned) skinnedCount += c.skinned->vertices->size();
+    if (skinnedCount * sizeof(Vertex) > slot->skinnedVertices.size) {
+        s.ctx.DestroyBuffer(slot->skinnedVertices);
+        slot->skinnedVertices = s.ctx.CreateBuffer(skinnedCount * sizeof(Vertex) * 3 / 2, kSkinnedVertexUsage, vk::MemoryKind::Upload);
+        s.WriteSceneDescriptors(*slot);
+    }
+    struct SkinnedBuild { FrameSlot::SkinnedBlas* blas; VkAccelerationStructureGeometryKHR geometry; };
+    std::vector<SkinnedBuild> skinnedBuilds;
+    uint32_t skinnedOffset = 0;
+    VkDeviceSize skinnedScratch = 0;
+    auto alignScratch = [&](VkDeviceSize v) { return (v + s.ctx.scratchAlignment - 1) / s.ctx.scratchAlignment * s.ctx.scratchAlignment; };
     auto* vkInstances = static_cast<VkAccelerationStructureInstanceKHR*>(slot->instanceBuffer.mapped);
     s.currentModels.clear();
     s.instanceScratch.clear();
     s.lightScratch.clear();
     float lightTotal = 0.0f;
+    Hasher skinnedHash;
     uint32_t count = 0;
     for (const DrawCommand& c : commands) {
         if (c.mesh >= s.blas.size() || !s.blas[c.mesh].handle) continue;
+        VkDeviceAddress blasAddress = s.blas[c.mesh].address;
+        uint32_t vertexOffset = s.meshRanges[c.mesh].y;
+        if (c.skinned) {
+            const std::vector<Vertex>& verts = *c.skinned->vertices;
+            vertexOffset = skinnedOffset;
+            std::memcpy(static_cast<Vertex*>(slot->skinnedVertices.mapped) + skinnedOffset, verts.data(), verts.size() * sizeof(Vertex));
+            skinnedOffset += static_cast<uint32_t>(verts.size());
+
+            FrameSlot::SkinnedBlas& b = slot->skinned[c.skinned->id];
+            VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
+            g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+            g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            auto& tri = g.geometry.triangles;
+            tri.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+            tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+            tri.vertexData.deviceAddress = slot->skinnedVertices.address + static_cast<VkDeviceAddress>(vertexOffset) * sizeof(Vertex);
+            tri.vertexStride = sizeof(Vertex);
+            tri.maxVertex = static_cast<uint32_t>(verts.size() - 1);
+            tri.indexType = VK_INDEX_TYPE_UINT32;
+            tri.indexData.deviceAddress = s.indices.address + static_cast<VkDeviceAddress>(s.meshRanges[c.mesh].x) * 4;
+            const uint32_t primitives = s.meshTriangles[c.mesh];
+            if (!b.as.handle || b.vertexCount != verts.size() || b.primitives != primitives) {
+                s.ctx.DestroyAccelerationStructure(b.as);
+                VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+                info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+                info.geometryCount = 1;
+                info.pGeometries = &g;
+                VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
+                vkGetAccelerationStructureBuildSizesKHR(s.ctx.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &primitives, &sizes);
+                b.as.storage = s.ctx.CreateBuffer(sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, vk::MemoryKind::GpuOnly);
+                VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};
+                ci.buffer = b.as.storage.buffer;
+                ci.size = sizes.accelerationStructureSize;
+                ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                vkCreateAccelerationStructureKHR(s.ctx.device, &ci, nullptr, &b.as.handle);
+                VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
+                ai.accelerationStructure = b.as.handle;
+                b.as.address = vkGetAccelerationStructureDeviceAddressKHR(s.ctx.device, &ai);
+                b.scratchSize = sizes.buildScratchSize;
+                b.vertexCount = static_cast<uint32_t>(verts.size());
+                b.primitives = primitives;
+                b.version = 0;
+            }
+            if (b.version != c.skinned->version) {
+                b.version = c.skinned->version;
+                skinnedBuilds.push_back({&b, g}); // unordered_map references stay valid
+                skinnedScratch += alignScratch(b.scratchSize);
+            }
+            b.lastUsed = s.submitted;
+            blasAddress = b.as.address;
+            skinnedHash.Add(c.skinned->id);
+            skinnedHash.Add(c.skinned->version);
+        }
         const Material& mat = c.material;
         const bool transmissive = mat.transmission > 0.0f;
         const bool masked = mat.alphaCutoff > 0.0f;
@@ -870,7 +958,7 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         inst.mask = 0xFF;
         inst.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR |
                      (transmissive || masked ? VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR : 0u);
-        inst.accelerationStructureReference = s.blas[c.mesh].address;
+        inst.accelerationStructureReference = blasAddress;
         vkInstances[count] = inst; // write-only: mapped memory is write-combined
 
         GpuInstance gi{};
@@ -878,7 +966,7 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         gi.emissionRoughness = glm::vec4(mat.emissive, mat.roughness);
         gi.layer = glm::vec4(mat.checkerScale, mat.clearcoat, mat.clearcoatRoughness, std::clamp(mat.transmission, 0.0f, 1.0f));
         gi.misc = glm::vec4(mat.ior, 0.0f, 0.0f, 0.0f);
-        gi.ids = glm::uvec4(c.mesh, s.meshTriangles[c.mesh], (transmissive ? kInstanceTransmissive : 0u) | (emitted > 0.0f ? kInstanceEmissive : 0u) | (masked ? kInstanceMasked : 0u), 0u);
+        gi.ids = glm::uvec4(c.mesh, s.meshTriangles[c.mesh], (transmissive ? kInstanceTransmissive : 0u) | (emitted > 0.0f ? kInstanceEmissive : 0u) | (masked ? kInstanceMasked : 0u) | (c.skinned ? kInstanceSkinned : 0u), vertexOffset);
         gi.row0 = glm::vec4(c.model[0][0], c.model[1][0], c.model[2][0], c.model[3][0]);
         gi.row1 = glm::vec4(c.model[0][1], c.model[1][1], c.model[2][1], c.model[3][1]);
         gi.row2 = glm::vec4(c.model[0][2], c.model[1][2], c.model[2][2], c.model[3][2]);
@@ -913,7 +1001,19 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
     std::memcpy(slot->instanceData.mapped, s.instanceScratch.data(), s.instanceScratch.size() * sizeof(GpuInstance));
     if (!s.lightScratch.empty()) std::memcpy(slot->lights.mapped, s.lightScratch.data(), s.lightScratch.size() * sizeof(GpuLight));
 
+    for (auto it = slot->skinned.begin(); it != slot->skinned.end();) { // this slot is idle: safe to free
+        if (it->second.lastUsed + 120 < s.submitted) {
+            s.ctx.DestroyAccelerationStructure(it->second.as);
+            it = slot->skinned.erase(it);
+        } else ++it;
+    }
+    if (skinnedScratch > slot->skinnedScratch.size) {
+        s.ctx.DestroyBuffer(slot->skinnedScratch);
+        slot->skinnedScratch = s.ctx.CreateBuffer(skinnedScratch * 3 / 2, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, vk::MemoryKind::GpuOnly, s.ctx.scratchAlignment);
+    }
+
     Hasher materialHash;
+    materialHash.Add(skinnedHash.h);
     for (const GpuInstance& gi : s.instanceScratch) {
         materialHash.Add(gi.albedoMetallic);
         materialHash.Add(gi.emissionRoughness);
@@ -1043,6 +1143,31 @@ uint32_t PathTracer::Render(const std::vector<DrawCommand>& commands, const Came
         dispatch(PassAtmoMultiScatter, glm::ivec4(0), kLutSizes[1][0], kLutSizes[1][1]);
     }
     dispatch(PassAtmoSkyView, glm::ivec4(0), groups(kLutSizes[2][0], 8), groups(kLutSizes[2][1], 8));
+
+    // Skinned meshes are rebuilt from scratch: robust against large pose changes, and fast enough.
+    if (!skinnedBuilds.empty()) {
+        std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos;
+        std::vector<VkAccelerationStructureBuildRangeInfoKHR> rangeData;
+        std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePtrs;
+        VkDeviceSize scratchOffset = 0;
+        for (const SkinnedBuild& sb : skinnedBuilds) {
+            VkAccelerationStructureBuildGeometryInfoKHR info{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
+            info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+            info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+            info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            info.dstAccelerationStructure = sb.blas->as.handle;
+            info.geometryCount = 1;
+            info.pGeometries = &sb.geometry;
+            info.scratchData.deviceAddress = slot->skinnedScratch.address + scratchOffset;
+            scratchOffset += alignScratch(sb.blas->scratchSize);
+            infos.push_back(info);
+            rangeData.push_back({sb.blas->primitives, 0, 0, 0});
+        }
+        for (const auto& r : rangeData) rangePtrs.push_back(&r);
+        vkCmdBuildAccelerationStructuresKHR(cmd, static_cast<uint32_t>(infos.size()), infos.data(), rangePtrs.data());
+        Barrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    }
 
     // Scene acceleration structure.
     VkAccelerationStructureGeometryKHR geometry{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "core/Engine.h"
+#include "animation/AnimationSystem.h"
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Log.h"
@@ -135,6 +136,7 @@ bool Engine::Init(const EngineConfig& config) {
 #endif
     m_assets = std::make_unique<AssetManager>();
     m_assets->Init(m_renderer.get(), m_assetDirectory);
+    m_animation = std::make_unique<AnimationSystem>();
     m_audio = std::make_unique<AudioEngine>();
     m_audio->Init(config.background); // automated runs stay silent
 
@@ -226,6 +228,7 @@ void Engine::Shutdown() {
     m_renderer.reset();
     if (m_window) m_window->Destroy();
 
+    m_animation.reset();
     m_assets.reset();
     m_audio.reset();
     m_fonts.clear();
@@ -305,6 +308,11 @@ void Engine::Run() {
             m_streamer->Update(focus);
         }
         FlushDestroyQueue();
+        {
+            MAGE_PROFILE_SCOPE(m_profiler, "Animation");
+            const float animDt = simulationPaused ? static_cast<float>(steps * fixedDt) : static_cast<float>(frameDt) * timeScale;
+            m_animation->Update(m_registry, *m_assets, m_renderer->Meshes(), animDt);
+        }
         m_audio->Update(m_camera.position, m_camera.Forward());
         if (auto dropped = m_window->TakeDroppedFiles(); !dropped.empty() && OnFilesDropped) OnFilesDropped(dropped);
 
@@ -382,12 +390,19 @@ void Engine::SubmitScene() {
         r.Submit(cmd);
     });
 
-    m_registry.Each<ModelComponent, TransformComponent>([&](Entity, ModelComponent& m, TransformComponent& t) {
+    m_registry.Each<ModelComponent, TransformComponent>([&](Entity e, ModelComponent& m, TransformComponent& t) {
         const Model* model = m.visible ? m_assets->GetModel(m.model) : nullptr;
         if (!model) return;
         const glm::mat4 world = t.Matrix();
-        for (const Model::Part& part : model->parts)
-            r.Submit(DrawCommand{part.mesh, world * part.transform, part.material, m.castShadows});
+        const AnimationSystem::Instance* anim = m_animation->Get(e);
+        if (anim && (anim->model != m.model || anim->geometry.size() != model->parts.size())) anim = nullptr;
+        for (size_t i = 0; i < model->parts.size(); ++i) {
+            const Model::Part& part = model->parts[i];
+            DrawCommand cmd{part.mesh, world * part.transform, part.material, m.castShadows};
+            if (anim && part.skin >= 0) cmd.skinned = &anim->geometry[i];
+            else if (anim && part.node >= 0) cmd.model = world * anim->globals[static_cast<size_t>(part.node)];
+            r.Submit(cmd);
+        }
     });
 
     // Vehicles: wheels (from the Jolt suspension state) + a cabin on top of the chassis.
@@ -459,6 +474,7 @@ void Engine::RenderFrame() {
         MAGE_PROFILE_SCOPE(m_profiler, "Render.Scene");
         m_renderer->BeginFrame(m_camera, width, height);
         SubmitScene();
+        if (OnRender) OnRender();
         if (drawPhysicsDebug) {
             MAGE_PROFILE_SCOPE(m_profiler, "Render.PhysicsDebug");
             PhysicsWorld::DebugDrawSettings dds;
@@ -493,6 +509,36 @@ void Engine::RenderFrame() {
     if (!m_screenshotPath.empty()) WriteScreenshot(fbWidth, fbHeight);
 
     m_window->SwapBuffers();
+}
+
+// ============================================================================ Animation
+bool Engine::PlayAnimation(Entity e, const std::string& clip, float fade, bool loop, float speed) {
+    auto* a = m_registry.TryGet<AnimatorComponent>(e);
+    const auto* mc = m_registry.TryGet<ModelComponent>(e);
+    const Model* model = a && mc ? m_assets->GetModel(mc->model) : nullptr;
+    return model && PlayClip(*a, model->rig, model->rig.FindClip(clip), fade, loop, speed);
+}
+
+int Engine::LoadAnimations(Entity e, const std::string& path) {
+    const auto* mc = m_registry.TryGet<ModelComponent>(e);
+    return mc ? m_assets->LoadAnimations(mc->model, path) : -1;
+}
+
+bool Engine::GetBoneTransform(Entity e, const std::string& bone, glm::mat4& world) const {
+    const auto* mc = m_registry.TryGet<ModelComponent>(e);
+    const auto* t = m_registry.TryGet<TransformComponent>(e);
+    const Model* model = mc && t ? m_assets->GetModel(mc->model) : nullptr;
+    const int node = model ? model->rig.FindNode(bone) : -1;
+    if (node < 0) return false;
+    const AnimationSystem::Instance* anim = m_animation->Get(e);
+    if (anim && anim->model == mc->model) {
+        world = t->Matrix() * anim->globals[static_cast<size_t>(node)];
+    } else {
+        std::vector<glm::mat4> globals;
+        ComputeGlobals(model->rig, model->rig.RestPose(), globals);
+        world = t->Matrix() * globals[static_cast<size_t>(node)];
+    }
+    return true;
 }
 
 // ============================================================================ Fonts & text
@@ -629,6 +675,18 @@ Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
         auto& mc = m_registry.Add<ModelComponent>(e);
         mc.model = modelHandle;
         mc.castShadows = d.castShadows;
+        for (const std::string& file : d.animationFiles) m_assets->LoadAnimations(modelHandle, file);
+        if (!model->rig.Empty()) {
+            auto& a = m_registry.Add<AnimatorComponent>(e);
+            int clip = model->rig.FindClip(d.animation);
+            if (d.animation.empty()) {
+                clip = model->rig.FindClip("idle");
+                if (clip < 0) clip = 0; // PlayClip ignores it when there are no clips
+            } else if (clip < 0 && d.animation != "none") {
+                Log::Warn("Model '{}' has no animation '{}'", d.model, d.animation);
+            }
+            PlayClip(a, model->rig, clip, 0.0f, true, 1.0f);
+        }
     } else {
     auto& m = m_registry.Add<MeshComponent>(e);
     m.mesh = m_renderer->Meshes().Find(d.mesh);
@@ -767,6 +825,8 @@ void Engine::OnSectorLoaded(const SectorData& data) {
         s.ior = d.ior;
         s.model = d.model;
         s.texture = d.texture;
+        s.animation = d.animation;
+        s.animationFiles = d.animationFiles;
         s.mass = d.mass;
         s.physics = d.physics == SectorPhysics::Dynamic ? SpawnPhysics::Dynamic
                   : d.physics == SectorPhysics::Static  ? SpawnPhysics::Static

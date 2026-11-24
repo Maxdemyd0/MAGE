@@ -53,6 +53,12 @@ namespace Mage.Interop
         public delegate* unmanaged<uint, void> StopAudio;
         public delegate* unmanaged<byte*, float, int> LoadFont;
         public delegate* unmanaged<byte*, float, float, float, uint, int, void> DrawLabel;
+        public delegate* unmanaged<uint, byte*, float, int, float, int> PlayAnimation;
+        public delegate* unmanaged<uint, void> StopAnimation;
+        public delegate* unmanaged<uint, byte*, int> LoadAnimations;
+        public delegate* unmanaged<uint, float*, float*, int> AnimationState;
+        public delegate* unmanaged<uint, float, int, void> SetAnimation;
+        public delegate* unmanaged<uint, byte*, Vector3*, Quaternion*, int> BonePosition;
     }
 
     /// <summary>Managed lifecycle entry points that C# hands back to the engine.</summary>
@@ -72,7 +78,7 @@ namespace Mage.Interop
     /// </summary>
     internal static unsafe class InternalCalls
     {
-        public const uint InteropVersion = 2;
+        public const uint InteropVersion = 3;
         public const uint InvalidEntity = 0xFFFFFFFF;
 
         private static NativeBindings s_native;
@@ -175,6 +181,42 @@ namespace Mage.Interop
         }
 
         public static void StopAudio(uint sound) => s_native.StopAudio(sound);
+
+        public static bool PlayAnimation(uint entity, string clip, float fade, bool loop, float speed)
+        {
+            using var c = new Utf8(clip);
+            return s_native.PlayAnimation(entity, c.Ptr, fade, loop ? 1 : 0, speed) != 0;
+        }
+
+        public static void StopAnimation(uint entity) => s_native.StopAnimation(entity);
+
+        public static int LoadAnimations(uint entity, string path)
+        {
+            using var p = new Utf8(path);
+            return s_native.LoadAnimations(entity, p.Ptr);
+        }
+
+        public static int AnimationState(uint entity, out float time, out float duration)
+        {
+            float t = 0f, d = 0f;
+            int state = s_native.AnimationState(entity, &t, &d);
+            time = t;
+            duration = d;
+            return state;
+        }
+
+        public static void SetAnimation(uint entity, float speed, bool inPlace) => s_native.SetAnimation(entity, speed, inPlace ? 1 : 0);
+
+        public static bool BonePosition(uint entity, string bone, out Vector3 position, out Quaternion rotation)
+        {
+            using var b = new Utf8(bone);
+            Vector3 p = default;
+            Quaternion q = default;
+            bool ok = s_native.BonePosition(entity, b.Ptr, &p, &q) != 0;
+            position = p;
+            rotation = q;
+            return ok;
+        }
 
         public static int LoadFont(string path, float size)
         {

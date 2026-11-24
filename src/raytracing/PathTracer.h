@@ -5,7 +5,7 @@
 // MAGE v1 - real-time hardware path tracer (Vulkan, VK_KHR_ray_query on RT cores).
 //
 // Runs on its own headless Vulkan device next to the OpenGL renderer:
-//   draw list -> TLAS over per-mesh BLAS -> pathtrace.comp (GGX/Lambert, sun NEE, sky, emission)
+//   draw list -> BLAS per skinned mesh -> TLAS over per-mesh BLAS -> pathtrace.comp (GGX/Lambert, sun NEE, sky, emission)
 //   -> temporal.comp (reprojection, unbounded accumulation while static)
 //   -> atrous.comp x N (SVGF-style edge-aware denoise) -> composite.comp (ACES)
 //   -> readback -> OpenGL texture displayed by the Renderer.

@@ -32,9 +32,16 @@ struct SurfaceHit {
     float lightPdfArea; // area-measure pdf of sampling this point through light NEE (0 = not a light)
 };
 
-vec3 VertexPosition(uint i) { return vec3(vertices[i * 8u + 0u], vertices[i * 8u + 1u], vertices[i * 8u + 2u]); }
-vec3 VertexNormal(uint i) { return vec3(vertices[i * 8u + 3u], vertices[i * 8u + 4u], vertices[i * 8u + 5u]); }
-vec2 VertexUV(uint i) { return vec2(vertices[i * 8u + 6u], vertices[i * 8u + 7u]); }
+vec3 FetchVec3(bool skinned, uint o) {
+    if (skinned) return vec3(skinnedVertices[o], skinnedVertices[o + 1u], skinnedVertices[o + 2u]);
+    return vec3(vertices[o], vertices[o + 1u], vertices[o + 2u]);
+}
+bool Skinned(Instance inst) { return (inst.ids.z & INSTANCE_SKINNED) != 0u; }
+vec3 VertexPosition(Instance inst, uint i) { return FetchVec3(Skinned(inst), i * 8u); }
+vec3 VertexNormal(Instance inst, uint i) { return FetchVec3(Skinned(inst), i * 8u + 3u); }
+vec2 VertexUV(Instance inst, uint i) { // u, v are the last two floats of the vertex
+    return FetchVec3(Skinned(inst), i * 8u + 5u).yz;
+}
 vec4 SampleTexture(uint id, vec2 uv, float lod) { return textureLod(materialTex[nonuniformEXT(id)], uv, lod); }
 float TextureLod(uint id, float baseLod) {
     vec2 size = vec2(textureSize(materialTex[nonuniformEXT(id)], 0));
@@ -43,8 +50,8 @@ float TextureLod(uint id, float baseLod) {
 vec2 InterpolateUV(Instance inst, uint prim, vec2 bary) {
     uvec4 mesh = meshes[inst.ids.x];
     uint base = mesh.x + prim * 3u;
-    return VertexUV(indices[base] + mesh.y) * (1.0 - bary.x - bary.y) + VertexUV(indices[base + 1u] + mesh.y) * bary.x +
-           VertexUV(indices[base + 2u] + mesh.y) * bary.y;
+    return VertexUV(inst, indices[base] + inst.ids.w) * (1.0 - bary.x - bary.y) + VertexUV(inst, indices[base + 1u] + inst.ids.w) * bary.x +
+           VertexUV(inst, indices[base + 2u] + inst.ids.w) * bary.y;
 }
 // Cut-out materials: is this point of the triangle solid?
 bool AlphaPass(Instance inst, uint prim, vec2 bary) {
@@ -62,9 +69,9 @@ vec3 ToWorld(Instance inst, vec3 p) {
 void TriangleWorld(Instance inst, uint prim, out vec3 p0, out vec3 p1, out vec3 p2) {
     uvec4 mesh = meshes[inst.ids.x];
     uint base = mesh.x + prim * 3u;
-    p0 = ToWorld(inst, VertexPosition(indices[base] + mesh.y));
-    p1 = ToWorld(inst, VertexPosition(indices[base + 1u] + mesh.y));
-    p2 = ToWorld(inst, VertexPosition(indices[base + 2u] + mesh.y));
+    p0 = ToWorld(inst, VertexPosition(inst, indices[base] + inst.ids.w));
+    p1 = ToWorld(inst, VertexPosition(inst, indices[base + 1u] + inst.ids.w));
+    p2 = ToWorld(inst, VertexPosition(inst, indices[base + 2u] + inst.ids.w));
 }
 
 bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
@@ -88,12 +95,12 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     Instance inst = instances[instanceId];
     uvec4 mesh = meshes[inst.ids.x];
     uint base = mesh.x + prim * 3u;
-    uint i0 = indices[base] + mesh.y, i1 = indices[base + 1u] + mesh.y, i2 = indices[base + 2u] + mesh.y;
+    uint i0 = indices[base] + inst.ids.w, i1 = indices[base + 1u] + inst.ids.w, i2 = indices[base + 2u] + inst.ids.w;
 
     vec3 w = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
-    vec3 nObj = VertexNormal(i0) * w.x + VertexNormal(i1) * w.y + VertexNormal(i2) * w.z;
-    vec3 p0 = VertexPosition(i0);
-    vec3 ngObj = cross(VertexPosition(i1) - p0, VertexPosition(i2) - p0);
+    vec3 nObj = VertexNormal(inst, i0) * w.x + VertexNormal(inst, i1) * w.y + VertexNormal(inst, i2) * w.z;
+    vec3 p0 = VertexPosition(inst, i0);
+    vec3 ngObj = cross(VertexPosition(inst, i1) - p0, VertexPosition(inst, i2) - p0);
 
     mat3 normalMatrix = transpose(mat3(worldToObject));
     vec3 ng = normalize(normalMatrix * ngObj);
@@ -113,7 +120,7 @@ bool TraceClosest(vec3 origin, vec3 dir, out SurfaceHit hit) {
     hit.transmission = inst.layer.w;
     hit.ior = max(inst.misc.x, 1.0);
     if (any(notEqual(inst.textures, uvec4(0u)))) {
-        vec2 uv0 = VertexUV(i0), uv1 = VertexUV(i1), uv2 = VertexUV(i2);
+        vec2 uv0 = VertexUV(inst, i0), uv1 = VertexUV(inst, i1), uv2 = VertexUV(inst, i2);
         vec2 uv = uv0 * w.x + uv1 * w.y + uv2 * w.z;
         vec3 a, b, c;
         TriangleWorld(inst, prim, a, b, c);

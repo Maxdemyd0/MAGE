@@ -16,6 +16,7 @@
 
 #include <glm/glm.hpp>
 
+#include "animation/Animation.h"
 #include "renderer/Material.h"
 #include "renderer/Mesh.h"
 
@@ -46,11 +47,15 @@ struct ModelMaterial {
 struct ModelPart {
     uint32_t mesh = 0;
     uint32_t material = 0;
-    glm::mat4 transform{1.0f};
+    glm::mat4 transform{1.0f}; // rest transform (identity for skinned parts)
+    int node = -1;             // rig node that moves a rigid part, -1 = never moves
+    int skin = -1;             // rig skin that deforms the part, -1 = rigid
 };
 
 struct ModelData {
     std::vector<MeshData> meshes;
+    std::vector<std::vector<SkinInfluence>> influences; // parallel to meshes, empty = not skinned
+    Rig rig;                                            // empty unless the file has skins or animations
     std::vector<ModelMaterial> materials;
     std::vector<ModelImage> images;
     std::vector<ModelPart> parts;
@@ -61,6 +66,9 @@ struct ModelData {
 };
 
 MAGE_API bool ImportModel(const std::filesystem::path& file, ModelData& out, std::string& error);
+// Skeleton and clips only: also accepts files without any mesh. Fails if there are no clips.
+MAGE_API bool ImportAnimations(const std::filesystem::path& file, Rig& out, std::string& error,
+                               std::vector<std::filesystem::path>* dependencies = nullptr);
 MAGE_API bool DecodeImage(const uint8_t* data, size_t size, ImageData& out, std::string& error);
 MAGE_API bool ImportImage(const std::filesystem::path& file, ImageData& out, std::string& error);
 MAGE_API bool ValidateFont(const std::filesystem::path& file, std::string& error);

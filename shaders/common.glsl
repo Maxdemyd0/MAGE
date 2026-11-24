@@ -20,7 +20,7 @@ struct Instance {
     vec4 emissionRoughness; // rgb emitted radiance, a roughness
     vec4 layer;             // x checker scale (m), y clearcoat, z clearcoat roughness, w transmission
     vec4 misc;              // x ior, y light selection probability (0 = not a light), zw -
-    uvec4 ids;              // x mesh index, y triangle count, z flags (1 transmissive, 2 emissive)
+    uvec4 ids;              // x mesh index, y triangle count, z flags (INSTANCE_*), w first vertex
     vec4 row0, row1, row2;  // object -> world (rows of the 3x4 matrix)
     uvec4 textures;         // base color, metallic-roughness, normal, emissive (0 = none)
     vec4 surface;           // x normal scale, y alpha, z alpha cutoff
@@ -30,6 +30,7 @@ layout(std430, set = 0, binding = 4) readonly buffer Instances { Instance instan
 const uint INSTANCE_TRANSMISSIVE = 1u;
 const uint INSTANCE_EMISSIVE = 2u;
 const uint INSTANCE_MASKED = 4u;
+const uint INSTANCE_SKINNED = 8u;   // vertices live in skinnedVertices
 
 layout(std140, set = 0, binding = 5) uniform Frame {
     mat4 invViewProj;
@@ -88,6 +89,8 @@ layout(set = 0, binding = 22, rgba16f) uniform image2D bloomImage[6];
 layout(set = 0, binding = 23) uniform sampler2D bloomTex[6];
 
 layout(set = 0, binding = 24) uniform sampler2D materialTex[1024];
+
+layout(std430, set = 0, binding = 25) readonly buffer SkinnedVertices { float skinnedVertices[]; };
 
 layout(push_constant) uniform Push { ivec4 pass; } pc;
 

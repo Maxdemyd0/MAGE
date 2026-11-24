@@ -51,6 +51,8 @@ set(MAGE_ENGINE_SOURCES
     src/renderer/Mesh.h             src/renderer/Mesh.cpp
     src/renderer/Material.h
     src/renderer/Texture.h          src/renderer/Texture.cpp
+    src/animation/Animation.h       src/animation/Animation.cpp
+    src/animation/AnimationSystem.h src/animation/AnimationSystem.cpp
     src/assets/Importers.h          src/assets/Importers.cpp
     src/assets/AssetManager.h       src/assets/AssetManager.cpp
     src/audio/AudioEngine.h         src/audio/AudioEngine.cpp
@@ -176,6 +178,8 @@ if(BUILD_TESTING)
     mage_add_executable(MAGE_Tests tests/ImportTests.cpp)
     target_include_directories(MAGE_Tests SYSTEM PRIVATE $<TARGET_PROPERTY:mage_import,INTERFACE_INCLUDE_DIRECTORIES>)
     add_test(NAME import COMMAND MAGE_Tests)
+    mage_add_executable(MAGE_AnimationTests tests/AnimationTests.cpp)
+    add_test(NAME animation COMMAND MAGE_AnimationTests)
 endif()
 
 if(MSVC)

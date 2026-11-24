@@ -6,6 +6,7 @@
 //  Panels: Viewport (scene rendered to texture, click-to-select via physics raycast),
 //  Hierarchy, Inspector, Physics, Vehicle Tuning, Streaming, Renderer, Profiler, Console.
 // =============================================================================
+#include "animation/AnimationSystem.h"
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Engine.h"
@@ -298,6 +299,8 @@ private:
             ImGui::Checkbox("Cast shadows##model", &mc->castShadows);
         }
 
+        if (auto* a = reg.TryGet<AnimatorComponent>(e); a && ImGui::CollapsingHeader("Animator", ImGuiTreeNodeFlags_DefaultOpen)) DrawAnimator(e, *a);
+
         if (rb && ImGui::CollapsingHeader("Rigid Body (Jolt)", ImGuiTreeNodeFlags_DefaultOpen)) {
             PhysicsWorld& physics = m_engine.GetPhysics();
             static const char* kMotion[] = {"Static", "Kinematic", "Dynamic"};
@@ -487,6 +490,57 @@ private:
         ImGui::End();
     }
 
+    // ------------------------------------------------------------------ animation
+    void DrawAnimator(Entity e, AnimatorComponent& a) {
+        const auto* mc = m_engine.GetRegistry().TryGet<ModelComponent>(e);
+        const Model* model = mc ? m_engine.GetAssets().GetModel(mc->model) : nullptr;
+        if (!model) return;
+        const Rig& rig = model->rig;
+        ImGui::Text("%zu nodes, %zu skins, %zu clips", rig.nodes.size(), rig.skins.size(), rig.clips.size());
+        ImGui::SliderFloat("Fade (s)", &m_fade, 0.0f, 1.0f);
+        const bool valid = a.clip >= 0 && a.clip < static_cast<int>(rig.clips.size());
+        if (ImGui::BeginCombo("Clip", valid ? rig.clips[static_cast<size_t>(a.clip)].name.c_str() : "(rest pose)")) {
+            for (int i = 0; i < static_cast<int>(rig.clips.size()); ++i) {
+                ImGui::PushID(i);
+                if (ImGui::Selectable(rig.clips[static_cast<size_t>(i)].name.c_str(), i == a.clip)) PlayClip(a, rig, i, m_fade, a.loop, a.speed);
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        if (valid) {
+            const float duration = rig.clips[static_cast<size_t>(a.clip)].duration;
+            if (ImGui::Button(a.playing ? "Pause##anim" : "Play##anim")) {
+                a.playing = !a.playing;
+                if (a.playing && !a.loop && a.time >= duration) a.time = 0.0f;
+            }
+            ImGui::SameLine();
+            ImGui::SliderFloat("Time", &a.time, 0.0f, duration, "%.2f s", ImGuiSliderFlags_AlwaysClamp);
+        }
+        ImGui::SliderFloat("Speed", &a.speed, -2.0f, 3.0f);
+        ImGui::Checkbox("Loop", &a.loop);
+        ImGui::SameLine();
+        ImGui::Checkbox("In place", &a.inPlace);
+        ImGui::SameLine();
+        ImGui::Checkbox("Show skeleton", &m_showSkeleton);
+    }
+
+public:
+    // World-space lines; called from OnRender.
+    void DrawSkeleton() {
+        const auto* t = m_engine.GetRegistry().TryGet<TransformComponent>(m_selected);
+        const auto* mc = m_engine.GetRegistry().TryGet<ModelComponent>(m_selected);
+        const auto* anim = m_engine.GetAnimation().Get(m_selected);
+        const Model* model = t && mc && anim ? m_engine.GetAssets().GetModel(mc->model) : nullptr;
+        if (!m_showSkeleton || !model || anim->model != mc->model) return;
+        const glm::mat4 world = t->Matrix();
+        for (size_t i = 0; i < model->rig.nodes.size(); ++i) {
+            const int p = model->rig.nodes[i].parent;
+            if (p < 0) continue;
+            m_engine.GetRenderer().DrawLine(glm::vec3(world * anim->globals[static_cast<size_t>(p)][3]), glm::vec3(world * anim->globals[i][3]), {1.0f, 0.85f, 0.1f});
+        }
+    }
+
+private:
     // ------------------------------------------------------------------ assets
     void DrawAssets() {
         // Saved layouts from before this panel existed: join the Console's tab group.
@@ -524,6 +578,14 @@ private:
             const char* action = a.type == AssetType::Model ? "Spawn" : a.type == AssetType::Image ? "Apply" : a.type == AssetType::Sound ? "Play" : "Load";
             if (ImGui::SmallButton(action)) UseAsset(a);
             ImGui::SameLine();
+            if (a.type == AssetType::Model && m_engine.GetRegistry().TryGet<AnimatorComponent>(m_selected)) {
+                if (ImGui::SmallButton("Add clips")) {
+                    const int n = m_engine.LoadAnimations(m_selected, a.path);
+                    m_importStatus = n < 0 ? "No usable clips in " + a.path + " (see Console)" : n == 0 ? "Clips were already added" : "Added clips from " + a.path;
+                }
+                ImGui::SetItemTooltip("Use this file's animations on the selected character");
+                ImGui::SameLine();
+            }
             ImGui::Text("[%s] %s", AssetTypeName(a.type), a.path.c_str());
             ImGui::PopID();
         }
@@ -598,6 +660,8 @@ private:
     std::vector<AssetManager::Entry> m_assetList;
     std::string m_importStatus;
     char m_importPath[512] = {};
+    float m_fade = 0.2f;
+    bool m_showSkeleton = false;
     int m_textureSlot = 0, m_modelPhysics = 1, m_previewFont = 0;
     SoundHandle m_previewSound = 0;
     bool m_hideSectorEntities = true;
@@ -650,6 +714,7 @@ int main(int argc, char** argv) {
         }
         editor.Update(dt);
     };
+    engine.OnRender = [&] { editor.DrawSkeleton(); };
     engine.OnImGui = [&] { editor.Draw(); };
     engine.OnFilesDropped = [&](const std::vector<std::filesystem::path>& files) { editor.ImportFiles(files); };
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // Copyright (C) 2026 Maxdemyd0 and MAGE contributors
 #include "scripting/ScriptHost.h"
+#include <cmath>
+
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Engine.h"
@@ -150,6 +152,38 @@ void Native_DrawLabel(const char* text, float x, float y, float size, uint32_t c
     if (text) s_engine->DrawLabel(text, {x, y}, size, glm::vec4((c >> 24) & 255, (c >> 16) & 255, (c >> 8) & 255, c & 255) / 255.0f, font);
 }
 
+int32_t Native_PlayAnimation(uint32_t entity, const char* clip, float fade, int32_t loop, float speed) {
+    return clip && s_engine->PlayAnimation(entity, clip, fade, loop != 0, speed) ? 1 : 0;
+}
+void Native_StopAnimation(uint32_t entity) {
+    if (auto* a = s_engine->GetRegistry().TryGet<AnimatorComponent>(entity)) a->playing = false;
+}
+int32_t Native_LoadAnimations(uint32_t entity, const char* path) { return path ? s_engine->LoadAnimations(entity, path) : -1; }
+int32_t Native_AnimationState(uint32_t entity, float* time, float* duration) {
+    const auto* a = s_engine->GetRegistry().TryGet<AnimatorComponent>(entity);
+    const auto* mc = s_engine->GetRegistry().TryGet<ModelComponent>(entity);
+    const Model* model = a && mc ? s_engine->GetAssets().GetModel(mc->model) : nullptr;
+    if (!model) return -1;
+    const bool valid = a->clip >= 0 && a->clip < static_cast<int>(model->rig.clips.size());
+    if (time) *time = a->time;
+    if (duration) *duration = valid ? model->rig.clips[static_cast<size_t>(a->clip)].duration : 0.0f;
+    return valid && a->playing ? 1 : 0;
+}
+void Native_SetAnimation(uint32_t entity, float speed, int32_t inPlace) {
+    if (auto* a = s_engine->GetRegistry().TryGet<AnimatorComponent>(entity)) {
+        if (std::isfinite(speed)) a->speed = speed;
+        a->inPlace = inPlace != 0;
+    }
+}
+int32_t Native_BonePosition(uint32_t entity, const char* bone, NVec3* position, NQuat* rotation) {
+    glm::mat4 m;
+    if (!bone || !s_engine->GetBoneTransform(entity, bone, m)) return 0;
+    const JointPose p = JointPose::FromMatrix(m);
+    if (position) *position = NVec3{p.translation.x, p.translation.y, p.translation.z};
+    if (rotation) *rotation = NQuat{p.rotation.x, p.rotation.y, p.rotation.z, p.rotation.w};
+    return 1;
+}
+
 #ifdef MAGE_HAS_DOTNET
 
 #if defined(_WIN32)
@@ -272,6 +306,12 @@ bool ScriptHost::Init(Engine& engine, const std::filesystem::path& scriptDirecto
     bindings.StopAudio = &Native_StopAudio;
     bindings.LoadFont = &Native_LoadFont;
     bindings.DrawLabel = &Native_DrawLabel;
+    bindings.PlayAnimation = &Native_PlayAnimation;
+    bindings.StopAnimation = &Native_StopAnimation;
+    bindings.LoadAnimations = &Native_LoadAnimations;
+    bindings.AnimationState = &Native_AnimationState;
+    bindings.SetAnimation = &Native_SetAnimation;
+    bindings.BonePosition = &Native_BonePosition;
 
     m_callbacks = {};
     const int32_t initResult = managedInit(&bindings, &m_callbacks);

@@ -37,6 +37,9 @@ struct Mesh {
     AABB bounds;
 };
 
+// Vertex attributes of the bound VBO for the bound VAO.
+void SetVertexLayout();
+
 struct MeshData {
     std::vector<Vertex> vertices;
     std::vector<uint32_t> indices;

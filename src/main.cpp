@@ -14,6 +14,8 @@
 //    --no-streaming       disable the sector streamer
 //    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
 //    --load-model <file>  spawn an imported model next to the car
+//    --animation <clip>   clip it plays;  --load-animations <file> adds clips from another file
+//    --model-count <n>    spawn it n times (performance tests)
 //    --font <file>        draw a line of text with a font file
 //    --background         do not take window focus; ignore the real keyboard (automated runs)
 //    --sun-elevation <d>  time of day as sun elevation in degrees (-18 night .. 90 noon)
@@ -29,6 +31,8 @@
 #include "scene/Testbed.h"
 #include "streaming/SectorStreamer.h"
 
+#include <vector>
+#include <algorithm>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
 
@@ -42,6 +46,9 @@ int main(int argc, char** argv) {
     double quitAfterSeconds = 0.0;
     float sunElevation = -1000.0f; // --sun-elevation <deg>: time of day for tests / screenshots
     bool autodrive = false;
+    std::string animation;                   // --animation <clip>
+    std::vector<std::string> animationFiles; // --load-animations <file>
+    int modelCount = 1;                      // --model-count <n>
     std::string loadModel, fontPath; // --load-model <file>, --font <file>: preview imported assets
     std::string screenshotPath;
     for (int i = 1; i < argc; ++i) {
@@ -54,6 +61,9 @@ int main(int argc, char** argv) {
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
         else if (arg == "--load-model" && i + 1 < argc) loadModel = argv[++i];
+        else if (arg == "--animation" && i + 1 < argc) animation = argv[++i];
+        else if (arg == "--load-animations" && i + 1 < argc) animationFiles.emplace_back(argv[++i]);
+        else if (arg == "--model-count" && i + 1 < argc) modelCount = std::clamp(std::atoi(argv[++i]), 1, 10000);
         else if (arg == "--font" && i + 1 < argc) fontPath = argv[++i];
         else if (arg == "--raster") config.enablePathTracing = false;
         else if (arg == "--background") config.background = true;
@@ -73,8 +83,16 @@ int main(int argc, char** argv) {
         d.name = "ImportedModel";
         d.model = loadModel;
         d.position = glm::vec3(2.6f, 0.0f, -15.0f);
-        d.physics = mage::SpawnPhysics::Static;
-        if (engine.SpawnPrimitive(d) == mage::NullEntity) mage::Log::Error("--load-model failed");
+        d.animation = animation;
+        d.animationFiles = animationFiles;
+        d.physics = modelCount == 1 ? mage::SpawnPhysics::Static : mage::SpawnPhysics::None;
+        for (int i = 0; i < modelCount; ++i) { // more than one: a grid in front of the car
+            if (modelCount > 1) d.position = glm::vec3(static_cast<float>(i % 10) * 1.5f - 6.75f, 0.0f, -14.0f + static_cast<float>(i / 10) * 1.5f);
+            if (engine.SpawnPrimitive(d) == mage::NullEntity) {
+                mage::Log::Error("--load-model failed");
+                break;
+            }
+        }
     }
     const int previewFont = fontPath.empty() ? 0 : engine.LoadFont(fontPath, 40.0f);
     if (sunElevation > -90.0f) {

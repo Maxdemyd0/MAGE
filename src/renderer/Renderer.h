@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -26,11 +27,22 @@
 
 namespace mage {
 
+// A mesh deformed on the CPU this frame. Owned by the animation system; must stay alive until EndFrame.
+struct SkinnedGeometry {
+    uint64_t id = 0;                 // unique per deforming mesh instance, 0 = none
+    uint64_t version = 0;            // changes whenever 'vertices' changes
+    const std::vector<Vertex>* vertices = nullptr; // same count and index buffer as DrawCommand::mesh
+    AABB bounds;
+};
+
 struct DrawCommand {
     MeshHandle mesh = InvalidMesh;
     glm::mat4 model{1.0f};
     Material material;
     bool castShadows = true;
+    const SkinnedGeometry* skinned = nullptr;
+
+    const AABB& Bounds(const Mesh& m) const { return skinned ? skinned->bounds : m.bounds; }
 };
 
 struct LightingSettings {
@@ -108,7 +120,10 @@ private:
     bool CreateShadowMap(int size);
     void DestroyRenderTarget(RenderTarget& rt);
     glm::mat4 ComputeLightViewProjection() const;
-    void DrawMesh(const Mesh& mesh) const;
+    void DrawMesh(const DrawCommand& command);
+    struct SkinnedBuffer { uint32_t vao = 0, vbo = 0; uint64_t version = 0, lastUsed = 0; };
+    std::unordered_map<uint64_t, SkinnedBuffer> m_skinnedBuffers;
+    uint64_t m_frameIndex = 0;
     void DrawLines();
 
     MeshLibrary m_meshes;
