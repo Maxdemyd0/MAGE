@@ -18,7 +18,9 @@ class MAGE_API Testbed {
 public:
     static constexpr const char* kVehicleScript = "GameScripts.TestVehicleScript";
     static constexpr const char* kPlayerScript = "GameScripts.PlayerScript";
+    static constexpr const char* kPedestrianScript = "GameScripts.PedestrianScript";
     bool startOnFoot = false; // set before Build
+    int pedestrians = 0;      // spawned around the plaza once its navigation mesh is ready
 
     void Build(Engine& engine);
     void Update(Engine& engine, float dt, bool cameraInputAllowed = true);
@@ -47,6 +49,7 @@ private:
     Entity m_vehicle = NullEntity;
     Entity m_player = NullEntity;
     Entity m_lastTarget = NullEntity;
+    int m_spawnedPedestrians = 0;
     glm::vec3 m_spawnPosition{0.0f, 1.2f, -20.0f};
     float m_nativeSteer = 0.0f;
     float m_previousForward = 1.0f;

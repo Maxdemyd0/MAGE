@@ -5,6 +5,7 @@
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Log.h"
+#include "navigation/NavWorld.h"
 #include "core/Window.h"
 #include "physics/PhysicsWorld.h"
 #include "renderer/GL.h"
@@ -137,6 +138,8 @@ bool Engine::Init(const EngineConfig& config) {
     m_assets = std::make_unique<AssetManager>();
     m_assets->Init(m_renderer.get(), m_assetDirectory);
     m_animation = std::make_unique<AnimationSystem>();
+    m_navigation = std::make_unique<NavWorld>();
+    if (!m_navigation->Init(*m_physics)) return false;
     m_audio = std::make_unique<AudioEngine>();
     m_audio->Init(config.background); // automated runs stay silent
 
@@ -222,6 +225,7 @@ void Engine::Shutdown() {
     if (m_assets) timeEndPeriod(1);
 #endif
     if (m_audio) m_audio->Shutdown();
+    if (m_navigation) m_navigation->Shutdown();
     if (m_physics) m_physics->Shutdown();
     ShutdownImGui();
     if (m_renderer) m_renderer->Shutdown();
@@ -306,6 +310,8 @@ void Engine::Run() {
             glm::vec3 focus = m_camera.position;
             if (const auto* t = m_registry.TryGet<TransformComponent>(m_streamingFocus)) focus = t->position;
             m_streamer->Update(focus);
+            MAGE_PROFILE_SCOPE(m_profiler, "Navigation.Tiles");
+            m_navigation->Update(focus);
         }
         FlushDestroyQueue();
         {
@@ -348,6 +354,7 @@ void Engine::FixedStep(float dt) {
         m_physics->SetVehicleInput(v.vehicle, v.throttle, v.steering, v.brake, v.handBrake);
     });
 
+    UpdateNavigation(dt);
     UpdateCharacters(dt);
 
     {
@@ -360,6 +367,76 @@ void Engine::FixedStep(float dt) {
         rb.prevPosition = rb.currPosition;
         rb.prevRotation = rb.currRotation;
         m_physics->GetBodyTransform(rb.body, rb.currPosition, rb.currRotation);
+    });
+}
+
+// ============================================================================ Navigation
+bool Engine::NavigateTo(Entity e, const glm::vec3& target, float speed, float stopDistance) {
+    const auto* c = m_registry.TryGet<CharacterComponent>(e);
+    if (!c) return false;
+    auto* n = m_registry.TryGet<NavAgentComponent>(e);
+    if (!n || !n->steered) {
+        ReleaseNavigation(e); // it may have been an obstacle so far
+        n = &m_registry.Add<NavAgentComponent>(e);
+        n->steered = true;
+        n->handles[0] = m_navigation->AddAgent(c->currPosition, c->radius + 0.05f, c->height);
+    }
+    return m_navigation->MoveAgent(n->handles[0], target, speed, stopDistance);
+}
+
+void Engine::StopNavigation(Entity e) {
+    if (const auto* n = m_registry.TryGet<NavAgentComponent>(e); n && n->steered) m_navigation->StopAgent(n->handles[0]);
+}
+
+int Engine::NavigationStatus(Entity e) const {
+    const auto* n = m_registry.TryGet<NavAgentComponent>(e);
+    return n && n->steered ? static_cast<int>(m_navigation->AgentStatus(n->handles[0])) : -1;
+}
+
+void Engine::ReleaseNavigation(Entity e) {
+    if (auto* n = m_registry.TryGet<NavAgentComponent>(e)) {
+        for (uint32_t h : n->handles) m_navigation->RemoveAgent(h);
+        m_registry.Remove<NavAgentComponent>(e);
+    }
+}
+
+void Engine::UpdateNavigation(float dt) {
+    MAGE_PROFILE_SCOPE(m_profiler, "Navigation.Agents");
+    m_registry.Each<CharacterComponent>([&](Entity e, CharacterComponent& c) {
+        auto* n = m_registry.TryGet<NavAgentComponent>(e);
+        if (c.character == InvalidCharacter) { // in a car: not on the street
+            if (n && !n->steered) ReleaseNavigation(e);
+            else if (n) m_navigation->PauseAgent(n->handles[0], true);
+            return;
+        }
+        if (!n) {
+            n = &m_registry.Add<NavAgentComponent>(e);
+            n->handles[0] = m_navigation->AddObstacle(c.currPosition, c.radius + 0.05f, c.height);
+        }
+        m_navigation->SetAgentBody(n->handles[0], c.currPosition, c.velocity);
+        if (n->steered) m_navigation->PauseAgent(n->handles[0], c.knockedDown > 0.0f);
+    });
+    m_registry.Each<VehicleComponent, RigidBodyComponent>([&](Entity e, VehicleComponent& v, RigidBodyComponent& rb) {
+        auto* n = m_registry.TryGet<NavAgentComponent>(e);
+        const float radius = v.bodyHalfExtents.x * 1.35f;
+        const glm::vec3 forward = rb.currRotation * glm::vec3(0.0f, 0.0f, std::max(v.bodyHalfExtents.z - radius * 0.7f, 0.0f));
+        const glm::vec3 feet = rb.currPosition - glm::vec3(0.0f, v.bodyHalfExtents.y + 0.4f, 0.0f);
+        if (!n) {
+            n = &m_registry.Add<NavAgentComponent>(e);
+            for (uint32_t& h : n->handles) h = m_navigation->AddObstacle(feet, radius, 1.6f);
+        }
+        const glm::vec3 velocity = m_physics->GetLinearVelocity(rb.body);
+        m_navigation->SetAgentBody(n->handles[0], feet + forward, velocity);
+        m_navigation->SetAgentBody(n->handles[1], feet - forward, velocity);
+    });
+
+    m_navigation->UpdateAgents(dt);
+
+    m_registry.Each<NavAgentComponent, CharacterComponent>([&](Entity, NavAgentComponent& n, CharacterComponent& c) {
+        if (!n.steered) return;
+        const bool moving = m_navigation->AgentStatus(n.handles[0]) == NavAgentStatus::Moving;
+        if (moving || n.drives) c.moveVelocity = moving ? m_navigation->AgentVelocity(n.handles[0]) : glm::vec3(0.0f);
+        n.drives = moving; // when idle, scripts may move the character themselves
     });
 }
 
@@ -616,6 +693,12 @@ void Engine::RenderFrame() {
         MAGE_PROFILE_SCOPE(m_profiler, "Render.Scene");
         m_renderer->BeginFrame(m_camera, width, height);
         SubmitScene();
+        if (drawNavMesh) {
+            std::vector<glm::vec3> lines;
+            m_navigation->DebugEdges(m_camera.target, 45.0f, lines);
+            for (size_t i = 0; i + 1 < lines.size(); i += 2)
+                m_renderer->DrawLine(lines[i] + glm::vec3(0, 0.06f, 0), lines[i + 1] + glm::vec3(0, 0.06f, 0), {0.1f, 0.75f, 1.0f});
+        }
         if (OnRender) OnRender();
         if (drawPhysicsDebug) {
             MAGE_PROFILE_SCOPE(m_profiler, "Render.PhysicsDebug");
@@ -795,6 +878,7 @@ void Engine::DestroyEntityNow(Entity e) {
     if (auto* s = m_registry.TryGet<ScriptComponent>(e); s && s->instantiated) m_scripts->DestroyInstance(e);
     if (auto* v = m_registry.TryGet<VehicleComponent>(e)) m_physics->DestroyVehicle(v->vehicle);
     if (auto* rb = m_registry.TryGet<RigidBodyComponent>(e)) m_physics->DestroyBody(rb->body);
+    ReleaseNavigation(e);
     if (auto* c = m_registry.TryGet<CharacterComponent>(e)) m_physics->DestroyCharacter(c->character);
     if (m_streamingFocus == e) m_streamingFocus = NullEntity;
     if (m_cameraTarget == e) m_cameraTarget = NullEntity;
@@ -890,6 +974,7 @@ Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
         rb.prevPosition = rb.currPosition = t.position;
         rb.prevRotation = rb.currRotation = t.rotation;
     }
+    if (!d.script.empty()) AttachScript(e, d.script);
     return e;
 }
 
@@ -964,10 +1049,22 @@ void Engine::SetEntityTransform(Entity e, const glm::vec3& position, const glm::
 }
 
 void Engine::StartScripts() {
-    m_registry.Each<ScriptComponent>([&](Entity e, ScriptComponent& s) {
-        if (s.instantiated || !m_scripts->IsReady()) return;
-        s.instantiated = m_scripts->CreateInstance(e, s.className);
-    });
+    // Scripts may attach more scripts from OnCreate, so never hold a component across that call.
+    std::vector<Entity> pending;
+    m_registry.Each<ScriptComponent>([&](Entity e, ScriptComponent& s) { if (!s.instantiated) pending.push_back(e); });
+    m_scriptsStarted = true;
+    for (Entity e : pending)
+        if (const auto* s = m_registry.TryGet<ScriptComponent>(e); s && !s->instantiated) AttachScript(e, std::string(s->className));
+}
+
+bool Engine::AttachScript(Entity e, const std::string& className) {
+    if (!m_registry.Valid(e) || className.empty()) return false;
+    if (const auto* old = m_registry.TryGet<ScriptComponent>(e); old && old->instantiated) m_scripts->DestroyInstance(e);
+    m_registry.Add<ScriptComponent>(e).className = className;
+    if (!m_scriptsStarted || !m_scripts->IsReady()) return false;
+    const bool ok = m_scripts->CreateInstance(e, className);
+    if (auto* s = m_registry.TryGet<ScriptComponent>(e)) s->instantiated = ok;
+    return ok;
 }
 
 // ============================================================================ Streaming
@@ -991,6 +1088,7 @@ void Engine::OnSectorLoaded(const SectorData& data) {
         s.ior = d.ior;
         s.model = d.model;
         s.texture = d.texture;
+        s.script = d.script;
         s.animation = d.animation;
         s.animationFiles = d.animationFiles;
         s.mass = d.mass;

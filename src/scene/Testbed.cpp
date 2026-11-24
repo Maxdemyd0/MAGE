@@ -4,6 +4,7 @@
 #include "core/Engine.h"
 #include "core/Log.h"
 #include "core/Window.h"
+#include "navigation/NavWorld.h"
 #include "renderer/Renderer.h"
 #include "raytracing/PathTracer.h"
 #include "scripting/ScriptHost.h"
@@ -212,7 +213,22 @@ void Testbed::Update(Engine& engine, float dt, bool cameraInputAllowed) {
         else { chaseCamera.Reset(); thirdPersonCamera.Reset(); }
     }
     if (input.IsKeyPressed(GLFW_KEY_V)) engine.GetWindow().SetCursorCaptured(!engine.GetWindow().CursorCaptured());
+    if (input.IsKeyPressed(GLFW_KEY_F4)) engine.drawNavMesh = !engine.drawNavMesh;
     if (UsingNativeController(engine) && input.IsKeyPressed(GLFW_KEY_R)) ResetVehicle(engine);
+
+    const glm::vec3 plaza(-8.0f, 0.0f, -14.0f);
+    if (m_spawnedPedestrians < pedestrians && engine.GetNavigation().IsReady(plaza) && engine.GetNavigation().Stats().pending == 0) {
+        SpawnDesc d;
+        d.name = "Pedestrian";
+        d.model = "models/mannequin/mannequin.glb";
+        d.physics = SpawnPhysics::Character;
+        d.script = kPedestrianScript;
+        // One try per frame; crowded or blocked spots are skipped.
+        const float radius = std::max(30.0f, std::sqrt(static_cast<float>(pedestrians)) * 5.0f);
+        if (engine.GetNavigation().RandomPoint(plaza, std::min(radius, 90.0f), d.position) &&
+            engine.GetPhysics().CharacterFits(0.4f, 1.8f, d.position + glm::vec3(0.0f, 0.05f, 0.0f)) && engine.SpawnPrimitive(d) != NullEntity)
+            ++m_spawnedPedestrians;
+    }
 
     Camera& camera = engine.GetCamera();
     const Entity target = engine.GetRegistry().Valid(engine.GetCameraTarget()) ? engine.GetCameraTarget() : m_vehicle;
@@ -331,7 +347,7 @@ void Testbed::DrawTuningWindow(Engine& engine, bool* open) {
     ImGui::SeparatorText("Controls");
     ImGui::TextDisabled("W/S throttle & brake/reverse, A/D steer, Space handbrake\n"
                         "R reset, E spawn crate (C#), F2 chase/fly camera, F3 path tracing,\n"
-                        "F enter/leave car, V mouse look; on foot: WASD, Shift sprint, Alt walk, Space jump\n"
+                        "F enter/leave car, V mouse look, F4 navigation mesh; on foot: WASD, Shift sprint, Alt walk, Space jump\n"
                         "RMB orbit, wheel zoom");
     ImGui::End();
 }

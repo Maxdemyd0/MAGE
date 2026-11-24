@@ -19,6 +19,7 @@ each one stays under its own license. All of these licenses are GPL-compatible.
 | ufbx | 0.23.1 | MIT or public domain | https://github.com/ufbx/ufbx |
 | stb (stb_image, stb_vorbis, stb_image_write) | 6b5799b | MIT or public domain | https://github.com/nothings/stb |
 | miniaudio | 0.11.26 | MIT-0 or public domain | https://github.com/mackron/miniaudio |
+| Recast & Detour | 1.6.0 | zlib | https://github.com/recastnavigation/recastnavigation |
 | glslang (build-time shader compiler only) | 15.0.0 | BSD-3-Clause and others | https://github.com/KhronosGroup/glslang |
 
 If you distribute MAGE binaries, include these notices along with the corresponding license texts from each project.

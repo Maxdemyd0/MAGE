@@ -38,6 +38,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace mage {
@@ -177,6 +178,7 @@ struct PhysicsWorld::Impl {
 #ifdef JPH_DEBUG_RENDERER
     std::unique_ptr<PhysicsDebugRenderer> debugRenderer;
 #endif
+    std::vector<StaticChange> staticChanges;
     PhysicsStats stats;
     bool initialized = false;
 
@@ -184,6 +186,17 @@ struct PhysicsWorld::Impl {
     const JPH::BodyInterface& Bodies() const { return system->GetBodyInterface(); }
 
     CharacterSlot* GetCharacter(CharacterHandle h) { return h < characters.size() && characters[h].character ? &characters[h] : nullptr; }
+    void NoteStaticChange(JPH::BodyID id) {
+        JPH::BodyLockRead lock(system->GetBodyLockInterface(), id);
+        if (!lock.Succeeded() || !lock.GetBody().IsStatic()) return;
+        const JPH::AABox b = lock.GetBody().GetWorldSpaceBounds();
+        staticChanges.push_back({ToGlm(b.mMin), ToGlm(b.mMax)});
+        if (staticChanges.size() > 8192) { // nobody listens: keep one box around everything
+            StaticChange all = staticChanges[0];
+            for (const StaticChange& c : staticChanges) { all.min = glm::min(all.min, c.min); all.max = glm::max(all.max, c.max); }
+            staticChanges.assign(1, all);
+        }
+    }
     Vehicle* GetVehicle(VehicleHandle h) const {
         return h < vehicles.size() ? vehicles[h].get() : nullptr;
     }
@@ -332,6 +345,7 @@ BodyHandle PhysicsWorld::CreateBody(const BodyDesc& desc) {
         Log::Error("PhysicsWorld: out of bodies");
         return InvalidBody;
     }
+    m->NoteStaticChange(id);
     return id.GetIndexAndSequenceNumber();
 }
 
@@ -339,6 +353,7 @@ void PhysicsWorld::DestroyBody(BodyHandle body) {
     if (body == InvalidBody) return;
     const JPH::BodyID id = ToBodyID(body);
     JPH::BodyInterface& bi = m->Bodies();
+    m->NoteStaticChange(id);
     if (bi.IsAdded(id)) bi.RemoveBody(id);
     bi.DestroyBody(id);
 }
@@ -361,8 +376,10 @@ void PhysicsWorld::SetBodyTransform(BodyHandle body, const glm::vec3& position, 
     const JPH::BodyID id = ToBodyID(body);
     JPH::BodyInterface& bi = m->Bodies();
     const bool isStatic = bi.GetMotionType(id) == JPH::EMotionType::Static;
+    if (isStatic) m->NoteStaticChange(id);
     bi.SetPositionAndRotation(id, ToJoltR(position), ToJolt(rotation),
                               isStatic ? JPH::EActivation::DontActivate : JPH::EActivation::Activate);
+    if (isStatic) m->NoteStaticChange(id);
     if (resetVelocity && !isStatic) bi.SetLinearAndAngularVelocity(id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
 }
 
@@ -420,6 +437,32 @@ bool PhysicsWorld::Raycast(const glm::vec3& origin, const glm::vec3& dir, float 
 
 // ============================================================================ Characters
 #include "physics/CharacterPhysics.inl"
+
+std::vector<StaticChange> PhysicsWorld::TakeStaticChanges() { return std::exchange(m->staticChanges, {}); }
+
+void PhysicsWorld::CollectStatic(const glm::vec3& min, const glm::vec3& max, StaticGeometry& out) const {
+    const JPH::AABox box(ToJolt(min), ToJolt(max));
+    JPH::AllHitCollisionCollector<JPH::CollideShapeBodyCollector> hits;
+    m->system->GetBroadPhaseQuery().CollideAABox(box, hits, JPH::SpecifiedBroadPhaseLayerFilter(BroadPhaseLayers::NonMoving));
+    for (const JPH::BodyID& id : hits.mHits) {
+        JPH::TransformedShape shape;
+        {
+            JPH::BodyLockRead lock(m->system->GetBodyLockInterface(), id);
+            if (!lock.Succeeded() || !lock.GetBody().IsStatic() || lock.GetBody().IsSensor()) continue;
+            shape = lock.GetBody().GetTransformedShape();
+        }
+        JPH::TransformedShape::GetTrianglesContext context;
+        shape.GetTrianglesStart(context, box, JPH::RVec3::sZero());
+        JPH::Float3 vertices[3 * 256];
+        for (int n; (n = shape.GetTrianglesNext(context, 256, vertices)) > 0;)
+            for (int i = 0; i < n * 3; ++i) out.triangles.emplace_back(vertices[i].x, vertices[i].y, vertices[i].z);
+        if (shape.mShape->GetSubType() != JPH::EShapeSubType::Box) continue;
+        const glm::quat q = ToGlm(shape.mShapeRotation);
+        if ((q * glm::vec3(0, 1, 0)).y < 0.999f) continue;
+        const glm::vec3 h = ToGlm(static_cast<const JPH::BoxShape*>(shape.mShape.GetPtr())->GetHalfExtent());
+        out.boxes.push_back({ToGlm(shape.mShapePositionCOM), q * glm::vec3(h.x, 0, 0), q * glm::vec3(0, 0, h.z), h.y});
+    }
+}
 
 // ============================================================================ Vehicles
 VehicleHandle PhysicsWorld::CreateRaycastVehicle(const VehicleDesc& desc, uint64_t userData, BodyHandle& outBody) {

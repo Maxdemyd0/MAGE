@@ -141,6 +141,14 @@ struct CharacterComponent {
     float heading = 0.0f;
 };
 
+// Navigation handles of a character or vehicle, managed by the engine. Characters become steered
+// agents with Engine::NavigateTo; everything else that moves is an obstacle to them.
+struct NavAgentComponent {
+    uint32_t handles[2] = {0xFFFFFFFFu, 0xFFFFFFFFu}; // NavWorld handles (long vehicles use two circles)
+    bool steered = false;
+    bool drives = false;             // wrote the character's velocity in the last step
+};
+
 struct VehicleComponent {
     uint32_t vehicle = 0xFFFFFFFFu;  // PhysicsWorld VehicleHandle
     glm::vec3 bodyHalfExtents{0.9f, 0.3f, 2.2f};

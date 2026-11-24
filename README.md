@@ -40,6 +40,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 | E | Spawn a crate (C# `Entity.Spawn`) |
 | F | Enter or leave the car |
 | V | Mouse look on or off |
+| F4 | Show the navigation mesh |
 | On foot | WASD run, Left Shift sprint, Left Alt walk, Space jump |
 | F1 | Jolt physics wireframes |
 | F3 | Switch between hardware path tracing and the raster renderer |
@@ -50,7 +51,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Runtime flags
 
-`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--on-foot`, `--autowalk` (on-foot demo), `--load-model <file>`, `--animation <clip>`, `--load-animations <file>`, `--model-count <n>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
+`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--pedestrians <n>`, `--show-nav`, `--on-foot`, `--autowalk` (on-foot demo), `--load-model <file>`, `--animation <clip>`, `--load-animations <file>`, `--model-count <n>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
 the real C++ -> C# -> Jolt path), `--quit-after <seconds>`, `--screenshot <file.bmp>`.
 
 Automated smoke test:
@@ -141,6 +142,25 @@ To add a gameplay script, derive from `Mage.Entity` in `scripting/GameScripts`, 
 
 Positions are relative to the sector centre. The default sector size is 96 m. `physics` is one of `static`, `dynamic` or `none`.
 The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
+
+### Navigation
+
+Characters find their way on a navigation mesh (Recast/Detour) that is built in the background from the static collision
+around the player, in 32 m tiles. Tiles are rebuilt when sectors stream or static bodies change. Agents avoid each other,
+the player and vehicles.
+
+```csharp
+var agent = new NavAgent(npc);                       // any character entity
+agent.MoveTo(target, speed: 1.4f);
+if (agent.Status == NavStatus.Blocked) { /* went as far as possible */ }
+Navigation.RandomPoint(Position, 25f, out Vector3 place);
+Navigation.FindPath(from, to, out Vector3[] corners);
+Entity.AttachScript<PedestrianScript>(npc);
+```
+
+`GameScripts/PedestrianScript.cs` wanders and runs from cars; sector entities take it as `"script"`. Try
+`--pedestrians 60`, and F4 to see the mesh. Agents outside the streamed area wait. Loose props (crates) are not part of
+the mesh: agents push through them. There are no jump links, doors, crosswalk rules or road lanes.
 
 ### Walking characters
 

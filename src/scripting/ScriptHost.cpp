@@ -6,6 +6,7 @@
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Engine.h"
+#include "navigation/NavWorld.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
 
@@ -221,6 +222,35 @@ void Native_SetCameraTarget(uint32_t entity) {
     if (s_engine->GetRegistry().Valid(entity)) s_engine->SetCameraTarget(entity);
 }
 
+int32_t Native_NavMoveTo(uint32_t entity, const NVec3* target, float speed, float stopDistance) {
+    return target && s_engine->NavigateTo(entity, ToGlm(*target), speed, stopDistance) ? 1 : 0;
+}
+void Native_NavStop(uint32_t entity) { s_engine->StopNavigation(entity); }
+int32_t Native_NavStatus(uint32_t entity) { return s_engine->NavigationStatus(entity); }
+int32_t Native_NavFindPath(const NVec3* from, const NVec3* to, NVec3* out, int32_t maxPoints, int32_t* result) {
+    if (result) *result = 0;
+    if (!from || !to) return 0;
+    std::vector<glm::vec3> points;
+    const NavPathResult r = s_engine->GetNavigation().FindPath(ToGlm(*from), ToGlm(*to), points);
+    if (result) *result = static_cast<int32_t>(r);
+    const auto n = static_cast<int32_t>(points.size());
+    for (int32_t i = 0; out && i < n && i < maxPoints; ++i) out[i] = ToNative(points[static_cast<size_t>(i)]);
+    return n;
+}
+int32_t Native_NavRandomPoint(const NVec3* center, float radius, NVec3* out) {
+    glm::vec3 p;
+    if (!center || !out || !s_engine->GetNavigation().RandomPoint(ToGlm(*center), radius, p)) return 0;
+    *out = ToNative(p);
+    return 1;
+}
+int32_t Native_NavNearestPoint(const NVec3* point, NVec3* out) {
+    glm::vec3 p;
+    if (!point || !out || !s_engine->GetNavigation().NearestPoint(ToGlm(*point), p)) return 0;
+    *out = ToNative(p);
+    return 1;
+}
+int32_t Native_AttachScript(uint32_t entity, const char* className) { return className && s_engine->AttachScript(entity, className) ? 1 : 0; }
+
 #ifdef MAGE_HAS_DOTNET
 
 #if defined(_WIN32)
@@ -356,6 +386,13 @@ bool ScriptHost::Init(Engine& engine, const std::filesystem::path& scriptDirecto
     bindings.KnockDown = &Native_KnockDown;
     bindings.GetCamera = &Native_GetCamera;
     bindings.SetCameraTarget = &Native_SetCameraTarget;
+    bindings.NavMoveTo = &Native_NavMoveTo;
+    bindings.NavStop = &Native_NavStop;
+    bindings.NavStatus = &Native_NavStatus;
+    bindings.NavFindPath = &Native_NavFindPath;
+    bindings.NavRandomPoint = &Native_NavRandomPoint;
+    bindings.NavNearestPoint = &Native_NavNearestPoint;
+    bindings.AttachScript = &Native_AttachScript;
 
     m_callbacks = {};
     const int32_t initResult = managedInit(&bindings, &m_callbacks);

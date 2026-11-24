@@ -13,6 +13,7 @@
 //    --no-scripts         skip .NET (native C++ controller drives the car)
 //    --no-streaming       disable the sector streamer
 //    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
+//    --pedestrians <n>    wandering people;  --show-nav draws the navigation mesh (F4)
 //    --on-foot            start beside the car;  --autowalk plays a short on-foot demo
 //    --load-model <file>  spawn an imported model next to the car
 //    --animation <clip>   clip it plays;  --load-animations <file> adds clips from another file
@@ -25,6 +26,7 @@
 //    --screenshot <file>  save a .bmp of the last frame before quitting
 // =============================================================================
 #include "core/Engine.h"
+#include "navigation/NavWorld.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
 #include "raytracing/PathTracer.h"
@@ -46,6 +48,8 @@ int main(int argc, char** argv) {
     config.title = "MAGE v1 Runtime - Vehicle Testbed";
     double quitAfterSeconds = 0.0;
     float sunElevation = -1000.0f; // --sun-elevation <deg>: time of day for tests / screenshots
+    int pedestrians = 0;                     // --pedestrians <n>
+    bool showNav = false;                    // --show-nav
     bool autodrive = false, onFoot = false, autowalk = false;
     std::string animation;                   // --animation <clip>
     std::vector<std::string> animationFiles; // --load-animations <file>
@@ -61,6 +65,8 @@ int main(int argc, char** argv) {
         else if (arg == "--max-fps" && i + 1 < argc) config.maxFps = std::atoi(argv[++i]);
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
+        else if (arg == "--pedestrians" && i + 1 < argc) pedestrians = std::clamp(std::atoi(argv[++i]), 0, 400);
+        else if (arg == "--show-nav") showNav = true;
         else if (arg == "--on-foot") onFoot = true;
         else if (arg == "--autowalk") onFoot = autowalk = true;
         else if (arg == "--load-model" && i + 1 < argc) loadModel = argv[++i];
@@ -81,6 +87,8 @@ int main(int argc, char** argv) {
 
     mage::Testbed testbed;
     testbed.startOnFoot = onFoot;
+    testbed.pedestrians = pedestrians;
+    engine.drawNavMesh = showNav;
     testbed.Build(engine);
     if (!loadModel.empty()) {
         mage::SpawnDesc d;
@@ -162,6 +170,14 @@ int main(int argc, char** argv) {
                                 p.width, p.height, p.instances, p.tracedFps, p.framesCompleted, p.gpuMs, p.latencyMs, p.uploadMs,
                                 p.staticFrames, p.cameraChanges, p.sceneChanges);
             }
+            const mage::NavStats nav = engine.GetNavigation().Stats();
+            int status[5] = {}, down = 0;
+            engine.GetRegistry().Each<mage::NavAgentComponent, mage::CharacterComponent>([&](mage::Entity e, mage::NavAgentComponent&, mage::CharacterComponent& c) {
+                if (const int st = engine.NavigationStatus(e); st >= 0 && st < 5) ++status[st];
+                down += c.knockedDown > 0.0f;
+            });
+            mage::Log::Info("Navigation: {} tiles, {} pending, {} builds (last {:.1f} ms), {} agents: {} idle, {} moving, {} arrived, {} blocked, {} waiting, {} knocked down",
+                            nav.tiles, nav.pending, nav.builds, nav.lastBuildMs, nav.agents, status[0], status[1], status[2], status[3], status[4], down);
             for (const auto& sample : engine.GetProfiler().Samples())
                 mage::Log::Trace("  profile {:<22} avg {:7.3f} ms  peak {:7.3f} ms", sample.name, sample.avgMs, sample.maxMs);
             engine.RequestQuit();

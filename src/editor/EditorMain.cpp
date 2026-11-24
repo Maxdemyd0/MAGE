@@ -10,6 +10,7 @@
 #include "assets/AssetManager.h"
 #include "audio/AudioEngine.h"
 #include "core/Engine.h"
+#include "navigation/NavWorld.h"
 #include "core/Log.h"
 #include "physics/PhysicsWorld.h"
 #include "renderer/Renderer.h"
@@ -143,6 +144,7 @@ private:
             ImGui::MenuItem("Assets", nullptr, &m_showAssets);
             ImGui::Separator();
             ImGui::MenuItem("Physics wireframe", "F1", &m_engine.drawPhysicsDebug);
+            ImGui::MenuItem("Navigation mesh", "F4", &m_engine.drawNavMesh);
             bool fly = m_testbed.cameraMode == Testbed::CameraMode::Fly;
             if (ImGui::MenuItem("Free-fly camera", "F2", &fly)) {
                 m_testbed.cameraMode = fly ? Testbed::CameraMode::Fly : Testbed::CameraMode::Chase;
@@ -372,6 +374,11 @@ private:
         ImGui::Checkbox("Body wireframes", &m_engine.drawPhysicsDebug);
         ImGui::Checkbox("Constraints / suspension", &m_engine.drawPhysicsConstraints);
         ImGui::Checkbox("Bounding boxes", &m_engine.drawPhysicsBounds);
+        ImGui::SeparatorText("Navigation");
+        const NavStats nav = m_engine.GetNavigation().Stats();
+        ImGui::Text("Tiles %d (%d pending), %llu builds, last %.1f ms, agents %d", nav.tiles, nav.pending, static_cast<unsigned long long>(nav.builds), nav.lastBuildMs, nav.agents);
+        ImGui::Checkbox("Show navigation mesh", &m_engine.drawNavMesh);
+        ImGui::SliderInt("Pedestrians", &m_testbed.pedestrians, 0, 100);
         ImGui::SeparatorText("Collision layers");
         ImGui::BulletText("STATIC_WORLD  - ground, ramps, buildings");
         ImGui::BulletText("DYNAMIC_PROP  - crates, balls, cones");

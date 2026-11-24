@@ -58,6 +58,9 @@ namespace Mage
 
         public static void Destroy(uint entity) => InternalCalls.DestroyEntity(entity);
 
+        /// <summary>Attaches a script to an entity, for example one that was just spawned.</summary>
+        public static bool AttachScript<T>(uint entity) where T : Entity => InternalCalls.AttachScript(entity, typeof(T).FullName!);
+
         public override string ToString() => $"{GetType().Name}#{ID}";
     }
 

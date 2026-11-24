@@ -11,7 +11,7 @@
 
 namespace mage::interop {
 
-inline constexpr uint32_t kInteropVersion = 4;
+inline constexpr uint32_t kInteropVersion = 5;
 
 struct NVec3 { float x, y, z; };
 struct NQuat { float x, y, z, w; };
@@ -75,6 +75,13 @@ using FnSetCharacterOptions = void (*)(uint32_t entity, float jumpSpeed, float k
 using FnKnockDown           = void (*)(uint32_t entity, const NVec3* velocity, float seconds);
 using FnGetCamera           = uint32_t (*)(NVec3* position, NVec3* forward); // returns the camera target
 using FnSetCameraTarget     = void (*)(uint32_t entity);
+using FnNavMoveTo       = int32_t (*)(uint32_t entity, const NVec3* target, float speed, float stopDistance);
+using FnNavStop         = void (*)(uint32_t entity);
+using FnNavStatus       = int32_t (*)(uint32_t entity); // NavAgentStatus, -1 = never navigated
+using FnNavFindPath     = int32_t (*)(const NVec3* from, const NVec3* to, NVec3* outPoints, int32_t maxPoints, int32_t* result); // NavPathResult
+using FnNavRandomPoint  = int32_t (*)(const NVec3* center, float radius, NVec3* outPoint);
+using FnNavNearestPoint = int32_t (*)(const NVec3* point, NVec3* outPoint);
+using FnAttachScript    = int32_t (*)(uint32_t entity, const char* utf8Class);
 
 struct NativeBindings {
     uint32_t structSize;
@@ -109,6 +116,13 @@ struct NativeBindings {
     FnKnockDown KnockDown;
     FnGetCamera GetCamera;
     FnSetCameraTarget SetCameraTarget;
+    FnNavMoveTo NavMoveTo;
+    FnNavStop NavStop;
+    FnNavStatus NavStatus;
+    FnNavFindPath NavFindPath;
+    FnNavRandomPoint NavRandomPoint;
+    FnNavNearestPoint NavNearestPoint;
+    FnAttachScript AttachScript;
 };
 
 // ---- Managed entry points filled in by C# ScriptEngine.Initialize ----
@@ -128,7 +142,7 @@ static_assert(sizeof(NQuat) == 16);
 static_assert(sizeof(NRaycastHit) == 32);
 static_assert(sizeof(NVehicleState) == 20);
 static_assert(sizeof(NCharacterState) == 40);
-static_assert(sizeof(NativeBindings) == 8 + 30 * sizeof(void*));
+static_assert(sizeof(NativeBindings) == 8 + 37 * sizeof(void*));
 static_assert(sizeof(ManagedCallbacks) == 5 * sizeof(void*));
 
 } // namespace mage::interop

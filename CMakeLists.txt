@@ -34,6 +34,7 @@ include(Dependencies)
 include(DotNet)
 include(Vulkan)
 include(Import)
+include(Navigation)
 
 # -----------------------------------------------------------------------------
 #  MAGE_Engine - the core engine library (shared by default)
@@ -60,6 +61,7 @@ set(MAGE_ENGINE_SOURCES
     src/renderer/Renderer.h         src/renderer/Renderer.cpp
     src/renderer/PhysicsDebugRenderer.h src/renderer/PhysicsDebugRenderer.cpp
     src/raytracing/PathTracer.h     src/raytracing/PathTracer.cpp
+    src/navigation/NavWorld.h       src/navigation/NavWorld.cpp
     src/physics/PhysicsWorld.h      src/physics/PhysicsWorld.cpp src/physics/CharacterPhysics.inl
     src/streaming/SectorStreamer.h  src/streaming/SectorStreamer.cpp
     src/scripting/InteropTypes.h
@@ -68,7 +70,7 @@ set(MAGE_ENGINE_SOURCES
 )
 
 if(MAGE_BUILD_SHARED)
-    add_library(MAGE_Engine SHARED ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import>)
+    add_library(MAGE_Engine SHARED ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import> $<TARGET_OBJECTS:mage_recast>)
     set_target_properties(MAGE_Engine PROPERTIES
         DEFINE_SYMBOL MAGE_ENGINE_BUILD
         CXX_VISIBILITY_PRESET hidden
@@ -86,14 +88,14 @@ if(MAGE_BUILD_SHARED)
     target_compile_definitions(mage_imgui PRIVATE "IMGUI_API=${_imgui_export}")
     target_compile_definitions(MAGE_Engine PRIVATE "IMGUI_API=${_imgui_export}" INTERFACE "IMGUI_API=${_imgui_import}")
 else()
-    add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import>)
+    add_library(MAGE_Engine STATIC ${MAGE_ENGINE_SOURCES} $<TARGET_OBJECTS:mage_imgui> $<TARGET_OBJECTS:mage_import> $<TARGET_OBJECTS:mage_recast>)
 endif()
 
 target_include_directories(MAGE_Engine PUBLIC
     "${CMAKE_SOURCE_DIR}/src"
     $<TARGET_PROPERTY:mage_imgui,INTERFACE_INCLUDE_DIRECTORIES>
     $<TARGET_PROPERTY:glfw,INTERFACE_INCLUDE_DIRECTORIES>)   # GLFW key codes for apps
-target_include_directories(MAGE_Engine SYSTEM PRIVATE $<TARGET_PROPERTY:mage_import,INTERFACE_INCLUDE_DIRECTORIES>)
+target_include_directories(MAGE_Engine SYSTEM PRIVATE $<TARGET_PROPERTY:mage_import,INTERFACE_INCLUDE_DIRECTORIES> $<TARGET_PROPERTY:mage_recast,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(MAGE_Engine
     PUBLIC
         GLFW_INCLUDE_NONE
@@ -182,6 +184,8 @@ if(BUILD_TESTING)
     add_test(NAME animation COMMAND MAGE_AnimationTests)
     mage_add_executable(MAGE_CharacterTests tests/CharacterTests.cpp)
     add_test(NAME character COMMAND MAGE_CharacterTests)
+    mage_add_executable(MAGE_NavTests tests/NavTests.cpp)
+    add_test(NAME navigation COMMAND MAGE_NavTests)
 endif()
 
 if(MSVC)

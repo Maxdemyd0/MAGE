@@ -55,6 +55,7 @@ struct SectorEntityDesc {
     float transmission = 0.0f;
     float ior = 1.5f;
     std::string model;             // imported model, replaces 'mesh'
+    std::string script;            // C# class
     std::string animation;         // clip name (see SpawnDesc)
     std::vector<std::string> animationFiles;
     std::string texture;

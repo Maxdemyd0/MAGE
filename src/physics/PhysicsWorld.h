@@ -126,6 +126,17 @@ struct CharacterState {
     uint64_t impactUserData = 0;
 };
 
+// Static collision as triangles (for building navigation meshes).
+struct StaticGeometry {
+    struct Box { // upright boxes, half axes
+        glm::vec3 center, axisX, axisZ;
+        float halfHeight;
+    };
+    std::vector<glm::vec3> triangles; // 3 per triangle, outward winding
+    std::vector<Box> boxes;
+};
+struct StaticChange { glm::vec3 min, max; };
+
 struct PhysicsStats {
     uint32_t numBodies = 0;
     uint32_t numActiveBodies = 0;
@@ -187,6 +198,9 @@ public:
     void SetCharacterVelocity(CharacterHandle character, const glm::vec3& velocity);
     BodyHandle GetCharacterBody(CharacterHandle character) const; // for Raycast's ignoreBody
     bool CharacterFits(float radius, float height, const glm::vec3& feet, BodyHandle ignore = InvalidBody) const;
+
+    void CollectStatic(const glm::vec3& min, const glm::vec3& max, StaticGeometry& out) const;
+    std::vector<StaticChange> TakeStaticChanges(); // where static bodies appeared, moved or vanished since the last call
 
     void SetGravity(const glm::vec3& gravity);
     glm::vec3 GetGravity() const;

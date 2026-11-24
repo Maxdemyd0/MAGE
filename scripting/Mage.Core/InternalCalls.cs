@@ -77,6 +77,13 @@ namespace Mage.Interop
         public delegate* unmanaged<uint, Vector3*, float, void> KnockDown;
         public delegate* unmanaged<Vector3*, Vector3*, uint> GetCamera;
         public delegate* unmanaged<uint, void> SetCameraTarget;
+        public delegate* unmanaged<uint, Vector3*, float, float, int> NavMoveTo;
+        public delegate* unmanaged<uint, void> NavStop;
+        public delegate* unmanaged<uint, int> NavStatus;
+        public delegate* unmanaged<Vector3*, Vector3*, Vector3*, int, int*, int> NavFindPath;
+        public delegate* unmanaged<Vector3*, float, Vector3*, int> NavRandomPoint;
+        public delegate* unmanaged<Vector3*, Vector3*, int> NavNearestPoint;
+        public delegate* unmanaged<uint, byte*, int> AttachScript;
     }
 
     /// <summary>Managed lifecycle entry points that C# hands back to the engine.</summary>
@@ -96,7 +103,7 @@ namespace Mage.Interop
     /// </summary>
     internal static unsafe class InternalCalls
     {
-        public const uint InteropVersion = 4;
+        public const uint InteropVersion = 5;
         public const uint InvalidEntity = 0xFFFFFFFF;
 
         private static NativeBindings s_native;
@@ -260,6 +267,43 @@ namespace Mage.Interop
         }
 
         public static void SetCameraTarget(uint entity) => s_native.SetCameraTarget(entity);
+
+        public static bool NavMoveTo(uint entity, Vector3 target, float speed, float stopDistance) => s_native.NavMoveTo(entity, &target, speed, stopDistance) != 0;
+        public static void NavStop(uint entity) => s_native.NavStop(entity);
+        public static int NavStatus(uint entity) => s_native.NavStatus(entity);
+
+        public static int NavFindPath(Vector3 from, Vector3 to, Vector3[] points, out int result)
+        {
+            int r = 0;
+            fixed (Vector3* p = points)
+            {
+                int n = s_native.NavFindPath(&from, &to, p, points.Length, &r);
+                result = r;
+                return n;
+            }
+        }
+
+        public static bool NavRandomPoint(Vector3 center, float radius, out Vector3 point)
+        {
+            Vector3 p = default;
+            bool ok = s_native.NavRandomPoint(&center, radius, &p) != 0;
+            point = p;
+            return ok;
+        }
+
+        public static bool NavNearestPoint(Vector3 near, out Vector3 point)
+        {
+            Vector3 p = default;
+            bool ok = s_native.NavNearestPoint(&near, &p) != 0;
+            point = p;
+            return ok;
+        }
+
+        public static bool AttachScript(uint entity, string className)
+        {
+            using var c = new Utf8(className);
+            return s_native.AttachScript(entity, c.Ptr) != 0;
+        }
 
         public static int LoadFont(string path, float size)
         {

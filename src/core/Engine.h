@@ -36,6 +36,7 @@ class ScriptHost;
 class AssetManager;
 class AudioEngine;
 class AnimationSystem;
+class NavWorld;
 struct SectorData;
 struct SectorCoord;
 struct VehicleDesc;
@@ -64,6 +65,7 @@ struct SpawnDesc {
     std::string mesh = "cube";      // cube | sphere | cylinder | cone | plane
     std::string model;              // imported model file; replaces mesh + material when set
     std::string texture;            // base colour texture for the primitive
+    std::string script;             // C# class, e.g. "GameScripts.PedestrianScript"
     std::string animation;          // clip to loop; empty = the model's idle (or first) clip, "none" = rest pose
     std::vector<std::string> animationFiles; // extra files with clips for the model's skeleton
     glm::vec3 position{0.0f};
@@ -148,6 +150,13 @@ public:
     AssetManager& GetAssets() { return *m_assets; }
     AudioEngine& GetAudio() { return *m_audio; }
     AnimationSystem& GetAnimation() { return *m_animation; }
+    NavWorld& GetNavigation() { return *m_navigation; }
+
+    // Walks a character to a point, around obstacles. Returns false if the entity is not a character.
+    bool NavigateTo(Entity e, const glm::vec3& target, float speed, float stopDistance);
+    void StopNavigation(Entity e);
+    int NavigationStatus(Entity e) const;       // NavAgentStatus, -1 if it never navigated
+    bool AttachScript(Entity e, const std::string& className); // now, or when scripts start
 
     // Animation by name. False if the entity has no skeleton or no such clip / bone.
     bool PlayAnimation(Entity e, const std::string& clip, float fadeSeconds = 0.2f, bool loop = true, float speed = 1.0f);
@@ -179,6 +188,7 @@ public:
     bool stepOnce = false;
     float timeScale = 1.0f;
     bool drawPhysicsDebug = false;
+    bool drawNavMesh = false;
     bool drawPhysicsConstraints = true;
     bool drawPhysicsBounds = false;
 
@@ -189,6 +199,8 @@ private:
     void DrawLabels();
     void FixedStep(float dt);
     void UpdateCharacters(float dt);
+    void UpdateNavigation(float dt);
+    void ReleaseNavigation(Entity e);
     void AnimateCharacters();
     void InterpolateTransforms(float alpha);
     void SubmitScene();
@@ -209,6 +221,7 @@ private:
     std::unique_ptr<AssetManager> m_assets;
     std::unique_ptr<AudioEngine> m_audio;
     std::unique_ptr<AnimationSystem> m_animation;
+    std::unique_ptr<NavWorld> m_navigation;
     struct FontEntry { std::string key; std::filesystem::path file; float size; void* font = nullptr; };
     struct Label { std::string text; glm::vec2 position; float size; glm::vec4 color; int font; };
     std::vector<FontEntry> m_fonts;
@@ -225,6 +238,7 @@ private:
     std::unordered_map<uint64_t, std::vector<Entity>> m_sectorEntities;
     Entity m_streamingFocus = NullEntity;
     Entity m_cameraTarget = NullEntity;
+    bool m_scriptsStarted = false;
     std::filesystem::path m_screenshotPath;
     int m_screenshotCounter = 0;
 
