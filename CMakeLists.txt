@@ -60,7 +60,7 @@ set(MAGE_ENGINE_SOURCES
     src/renderer/Renderer.h         src/renderer/Renderer.cpp
     src/renderer/PhysicsDebugRenderer.h src/renderer/PhysicsDebugRenderer.cpp
     src/raytracing/PathTracer.h     src/raytracing/PathTracer.cpp
-    src/physics/PhysicsWorld.h      src/physics/PhysicsWorld.cpp
+    src/physics/PhysicsWorld.h      src/physics/PhysicsWorld.cpp src/physics/CharacterPhysics.inl
     src/streaming/SectorStreamer.h  src/streaming/SectorStreamer.cpp
     src/scripting/InteropTypes.h
     src/scripting/ScriptHost.h      src/scripting/ScriptHost.cpp
@@ -180,6 +180,8 @@ if(BUILD_TESTING)
     add_test(NAME import COMMAND MAGE_Tests)
     mage_add_executable(MAGE_AnimationTests tests/AnimationTests.cpp)
     add_test(NAME animation COMMAND MAGE_AnimationTests)
+    mage_add_executable(MAGE_CharacterTests tests/CharacterTests.cpp)
+    add_test(NAME character COMMAND MAGE_CharacterTests)
 endif()
 
 if(MSVC)

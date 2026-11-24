@@ -57,7 +57,7 @@ struct EngineConfig {
     std::filesystem::path scriptDirectory;  // empty = <exe>/Scripts
 };
 
-enum class SpawnPhysics : uint8_t { None, Static, Kinematic, Dynamic };
+enum class SpawnPhysics : uint8_t { None, Static, Kinematic, Dynamic, Character };
 
 struct SpawnDesc {
     std::string name = "Entity";
@@ -126,6 +126,15 @@ public:
     void SetStreamingFocus(Entity entity) { m_streamingFocus = entity; }
     Entity GetStreamingFocus() const { return m_streamingFocus; }
 
+    // Entity the game camera follows (a character or a vehicle). Also moves the streaming focus.
+    void SetCameraTarget(Entity entity) { m_cameraTarget = entity; if (entity != NullEntity) m_streamingFocus = entity; }
+    Entity GetCameraTarget() const { return m_cameraTarget; }
+
+    // Characters. Disabling removes the body and hides the model (for example inside a car). Enabling
+    // places the feet at 'position' and fails if there is no room.
+    bool SetCharacterEnabled(Entity e, bool enabled, const glm::vec3& position);
+    void KnockDown(Entity e, const glm::vec3& velocity, float seconds); // seconds <= 0: the component's default
+
     // Subsystems.
     Registry& GetRegistry() { return m_registry; }
     const Registry& GetRegistry() const { return m_registry; }
@@ -179,6 +188,8 @@ private:
     void BuildPendingFonts();
     void DrawLabels();
     void FixedStep(float dt);
+    void UpdateCharacters(float dt);
+    void AnimateCharacters();
     void InterpolateTransforms(float alpha);
     void SubmitScene();
     void RenderFrame();
@@ -213,6 +224,7 @@ private:
     std::vector<Entity> m_destroyQueue;
     std::unordered_map<uint64_t, std::vector<Entity>> m_sectorEntities;
     Entity m_streamingFocus = NullEntity;
+    Entity m_cameraTarget = NullEntity;
     std::filesystem::path m_screenshotPath;
     int m_screenshotCounter = 0;
 

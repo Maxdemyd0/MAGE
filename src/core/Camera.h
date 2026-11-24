@@ -4,6 +4,8 @@
 #include "core/Export.h"
 // MAGE v1 - camera, view frustum and camera controllers.
 
+#include <functional>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -52,6 +54,27 @@ private:
     float m_orbitYaw = 0.0f;
     float m_orbitPitch = 0.0f;
     glm::vec3 m_position{0.0f};
+};
+
+// Third-person camera for characters: orbit with the mouse (right button, or always with a captured
+// cursor), drifts behind the character while it moves, and stays in front of walls.
+class MAGE_API ThirdPersonCameraController {
+public:
+    float distance = 4.2f;
+    float pivotHeight = 1.5f;        // above the feet
+    float shoulder = 0.35f;
+    float sensitivity = 0.0035f;
+
+    // clearance(origin, direction, maxDistance) returns how far the camera may move.
+    using ClearanceFn = std::function<float(const glm::vec3&, const glm::vec3&, float)>;
+    void Update(Camera& camera, const Input& input, const glm::vec3& feet, const glm::vec3& velocity, float heading, float dt,
+                bool allowMouse, bool cursorCaptured, const ClearanceFn& clearance);
+    void Reset() { m_initialized = false; }
+
+private:
+    bool m_initialized = false;
+    float m_yaw = 0.0f, m_pitch = 0.25f, m_current = 4.0f, m_idleMouse = 0.0f;
+    glm::vec3 m_pivot{0.0f};
 };
 
 // Free-fly camera (editor): hold RMB + WASD/QE, Shift to go fast.

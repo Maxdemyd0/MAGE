@@ -13,6 +13,7 @@
 //    --no-scripts         skip .NET (native C++ controller drives the car)
 //    --no-streaming       disable the sector streamer
 //    --raster             skip the Vulkan path tracer (OpenGL raster only; F3 toggles at runtime)
+//    --on-foot            start beside the car;  --autowalk plays a short on-foot demo
 //    --load-model <file>  spawn an imported model next to the car
 //    --animation <clip>   clip it plays;  --load-animations <file> adds clips from another file
 //    --model-count <n>    spawn it n times (performance tests)
@@ -45,7 +46,7 @@ int main(int argc, char** argv) {
     config.title = "MAGE v1 Runtime - Vehicle Testbed";
     double quitAfterSeconds = 0.0;
     float sunElevation = -1000.0f; // --sun-elevation <deg>: time of day for tests / screenshots
-    bool autodrive = false;
+    bool autodrive = false, onFoot = false, autowalk = false;
     std::string animation;                   // --animation <clip>
     std::vector<std::string> animationFiles; // --load-animations <file>
     int modelCount = 1;                      // --model-count <n>
@@ -60,6 +61,8 @@ int main(int argc, char** argv) {
         else if (arg == "--max-fps" && i + 1 < argc) config.maxFps = std::atoi(argv[++i]);
         else if (arg == "--no-scripts") config.enableScripting = false;
         else if (arg == "--no-streaming") config.enableStreaming = false;
+        else if (arg == "--on-foot") onFoot = true;
+        else if (arg == "--autowalk") onFoot = autowalk = true;
         else if (arg == "--load-model" && i + 1 < argc) loadModel = argv[++i];
         else if (arg == "--animation" && i + 1 < argc) animation = argv[++i];
         else if (arg == "--load-animations" && i + 1 < argc) animationFiles.emplace_back(argv[++i]);
@@ -77,6 +80,7 @@ int main(int argc, char** argv) {
     }
 
     mage::Testbed testbed;
+    testbed.startOnFoot = onFoot;
     testbed.Build(engine);
     if (!loadModel.empty()) {
         mage::SpawnDesc d;
@@ -119,6 +123,18 @@ int main(int argc, char** argv) {
             input.InjectKey(GLFW_KEY_W, t > 0.5);
             input.InjectKey(GLFW_KEY_D, t > 4.0 && std::fmod(t, 8.0) < 3.0);
             input.InjectKey(GLFW_KEY_A, t > 4.0 && std::fmod(t, 8.0) >= 5.0);
+        }
+        if (autowalk) {
+            // Walk around, jump, then get into the car, drive, and get out again.
+            const double t = elapsed;
+            input.InjectKey(GLFW_KEY_W, (t > 0.5 && t < 3.0) || (t > 8.0 && t < 10.0));
+            input.InjectKey(GLFW_KEY_S, (t > 3.5 && t < 6.9) || (t > 10.0 && t < 12.5));
+            input.InjectKey(GLFW_KEY_LEFT_SHIFT, t > 2.0 && t < 3.0);
+            input.InjectKey(GLFW_KEY_SPACE, (t > 1.2 && t < 1.3) || (t > 12.5 && t < 14.0));
+            input.InjectKey(GLFW_KEY_F, (t > 7.0 && t < 7.1) || (t > 14.0 && t < 14.1));
+            if (const auto* c = engine.GetRegistry().TryGet<mage::CharacterComponent>(testbed.Player()); c && std::floor(t * 4.0) != std::floor((t - dt) * 4.0))
+                mage::Log::Info("Player t={:.2f} pos ({:.2f}, {:.2f}, {:.2f}) {:.2f} m/s {} target {}", t, c->currPosition.x, c->currPosition.y, c->currPosition.z,
+                                glm::length(c->velocity), c->character == mage::InvalidCharacter ? "in car" : c->grounded ? "grounded" : "air", engine.GetCameraTarget());
         }
         if (const auto* v = engine.GetRegistry().TryGet<mage::VehicleComponent>(testbed.Vehicle()))
             maxSpeedKmh = std::max(maxSpeedKmh, engine.GetPhysics().GetVehicleTelemetry(v->vehicle).speedKmh);

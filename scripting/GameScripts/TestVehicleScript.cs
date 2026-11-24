@@ -22,6 +22,12 @@ namespace GameScripts
         public float HighSpeedSteerFactor = 0.45f; // steering authority left at 120 km/h
         public float FlippedResetDelay = 2.5f;    // seconds upside-down before auto reset
 
+        /// <summary>The testbed's car, for the player script.</summary>
+        public static TestVehicleScript? Instance { get; private set; }
+        /// <summary>Without a driver the car ignores input and holds its handbrake.</summary>
+        public bool HasDriver = true;
+        public float SpeedKmh => MathF.Abs(_vehicle.State.SpeedKmh);
+
         private VehicleController _vehicle = null!;
         private Vector3 _spawnPosition;
         private Quaternion _spawnRotation;
@@ -33,6 +39,7 @@ namespace GameScripts
 
         public override void OnCreate()
         {
+            Instance = this;
             _vehicle = new VehicleController(this);
             _spawnPosition = Position;
             _spawnRotation = Rotation;
@@ -41,8 +48,8 @@ namespace GameScripts
 
         public override void OnUpdate(float dt)
         {
-            if (Input.IsKeyPressed(KeyCode.R)) ResetVehicle("manual reset");
-            if (Input.IsKeyPressed(KeyCode.E)) SpawnCrate();
+            if (HasDriver && Input.IsKeyPressed(KeyCode.R)) ResetVehicle("manual reset");
+            if (HasDriver && Input.IsKeyPressed(KeyCode.E)) SpawnCrate();
 
             // Periodic telemetry to the engine console.
             _telemetryTimer += dt;
@@ -56,6 +63,12 @@ namespace GameScripts
 
         public override void OnFixedUpdate(float dt)
         {
+            if (!HasDriver)
+            {
+                _steer = MoveTowards(_steer, 0f, SteerReturnSpeed * dt);
+                _vehicle.SetInput(0f, _steer, 0f, 1f);
+                return;
+            }
             float forward = Input.GetAxis(KeyCode.S, KeyCode.W, KeyCode.Down, KeyCode.Up);
             float right = Input.GetAxis(KeyCode.A, KeyCode.D, KeyCode.Left, KeyCode.Right);
             float handBrake = Input.IsKeyDown(KeyCode.Space) ? 1f : 0f;
@@ -102,6 +115,7 @@ namespace GameScripts
 
         public override void OnDestroy()
         {
+            if (Instance == this) Instance = null;
             Log.Info($"TestVehicleScript on entity {ID} destroyed ({_spawnedCrates} crates spawned)");
         }
 

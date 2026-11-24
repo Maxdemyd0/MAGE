@@ -44,12 +44,14 @@ json WriteVec3(const glm::vec3& v) { return json::array({v.x, v.y, v.z}); }
 SectorPhysics ParsePhysics(const std::string& s) {
     if (s == "dynamic") return SectorPhysics::Dynamic;
     if (s == "none") return SectorPhysics::None;
+    if (s == "character") return SectorPhysics::Character;
     return SectorPhysics::Static;
 }
 
 const char* PhysicsName(SectorPhysics p) {
     switch (p) {
         case SectorPhysics::Dynamic: return "dynamic";
+        case SectorPhysics::Character: return "character";
         case SectorPhysics::None: return "none";
         default: return "static";
     }

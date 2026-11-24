@@ -11,7 +11,11 @@
 #include <Jolt/Physics/Body/BodyActivationListener.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
@@ -109,6 +113,8 @@ class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
 public:
     bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
         const auto staticWorld = ToLayer(ObjectLayer::StaticWorld);
+        const auto character = ToLayer(ObjectLayer::Character);
+        if (a == character || b == character) return false; // query-only body
         if (a == staticWorld) return b != staticWorld; // STATIC_WORLD vs everything that moves
         return true;                                   // DYNAMIC_PROP / VEHICLE / RAGDOLL collide with all
     }
@@ -150,6 +156,14 @@ struct Vehicle {
     float wheelWidth = 0.3f;
 };
 
+struct CharacterSlot {
+    JPH::Ref<JPH::CharacterVirtual> character;
+    CharacterDesc desc;
+    bool wasGrounded = true;
+    bool launched = false;   // velocity was set from outside with an upward part
+    bool teleported = true;
+};
+
 struct PhysicsWorld::Impl {
     std::unique_ptr<JPH::TempAllocatorImpl> tempAllocator;
     std::unique_ptr<JPH::JobSystemThreadPool> jobSystem;
@@ -157,6 +171,8 @@ struct PhysicsWorld::Impl {
     ObjectVsBroadPhaseFilter objectVsBroadPhase;
     ObjectLayerPairFilter objectPairs;
     std::unique_ptr<JPH::PhysicsSystem> system;
+    JPH::CharacterVsCharacterCollisionSimple characterPairs;
+    std::vector<CharacterSlot> characters; // index == CharacterHandle (null character = free slot)
     std::vector<std::unique_ptr<Vehicle>> vehicles; // index == VehicleHandle (nullptr = free slot)
 #ifdef JPH_DEBUG_RENDERER
     std::unique_ptr<PhysicsDebugRenderer> debugRenderer;
@@ -167,6 +183,7 @@ struct PhysicsWorld::Impl {
     JPH::BodyInterface& Bodies() { return system->GetBodyInterface(); }
     const JPH::BodyInterface& Bodies() const { return system->GetBodyInterface(); }
 
+    CharacterSlot* GetCharacter(CharacterHandle h) { return h < characters.size() && characters[h].character ? &characters[h] : nullptr; }
     Vehicle* GetVehicle(VehicleHandle h) const {
         return h < vehicles.size() ? vehicles[h].get() : nullptr;
     }
@@ -202,6 +219,8 @@ void PhysicsWorld::Shutdown() {
     if (!m->initialized) return;
     for (VehicleHandle h = 0; h < m->vehicles.size(); ++h) DestroyVehicle(h);
     m->vehicles.clear();
+    for (CharacterHandle h = 0; h < m->characters.size(); ++h) DestroyCharacter(h);
+    m->characters.clear();
 
     // Remove any remaining bodies.
     JPH::BodyIDVector ids;
@@ -398,6 +417,9 @@ bool PhysicsWorld::Raycast(const glm::vec3& origin, const glm::vec3& dir, float 
     }
     return true;
 }
+
+// ============================================================================ Characters
+#include "physics/CharacterPhysics.inl"
 
 // ============================================================================ Vehicles
 VehicleHandle PhysicsWorld::CreateRaycastVehicle(const VehicleDesc& desc, uint64_t userData, BodyHandle& outBody) {

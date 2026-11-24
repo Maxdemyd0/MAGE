@@ -38,6 +38,9 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 | Space | Handbrake |
 | R | Reset the vehicle |
 | E | Spawn a crate (C# `Entity.Spawn`) |
+| F | Enter or leave the car |
+| V | Mouse look on or off |
+| On foot | WASD run, Left Shift sprint, Left Alt walk, Space jump |
 | F1 | Jolt physics wireframes |
 | F3 | Switch between hardware path tracing and the raster renderer |
 | F2 | Switch between chase and free-fly camera (free-fly: hold RMB + WASD/QE) |
@@ -47,7 +50,7 @@ Pass `-DMAGE_BUILD_SHARED=OFF` to link it statically instead.
 
 ### Runtime flags
 
-`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--load-model <file>`, `--animation <clip>`, `--load-animations <file>`, `--model-count <n>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
+`--no-vsync`, `--max-fps <n>` (default 240), `--raster`, `--sun-elevation <deg>`, `--background` (no focus, input or sound, for automated runs), `--on-foot`, `--autowalk` (on-foot demo), `--load-model <file>`, `--animation <clip>`, `--load-animations <file>`, `--model-count <n>`, `--font <file>`, `--no-scripts`, `--no-streaming`, `--autodrive` (demo autopilot that feeds synthetic key presses through
 the real C++ -> C# -> Jolt path), `--quit-after <seconds>`, `--screenshot <file.bmp>`.
 
 Automated smoke test:
@@ -138,6 +141,24 @@ To add a gameplay script, derive from `Mage.Entity` in `scripting/GameScripts`, 
 
 Positions are relative to the sector centre. The default sector size is 96 m. `physics` is one of `static`, `dynamic` or `none`.
 The available meshes are `cube`, `sphere`, `cylinder`, `cone` and `plane`.
+
+### Walking characters
+
+Spawn a model with `ModelPhysics.Character` (C#), `"physics": "character"` (sector JSON) or **Walking character** (editor)
+and it gets a `CharacterComponent`: a capsule with stairs (0.4 m), slopes (48 degrees), moving ground, jumping, pushing
+and being hit. Idle, walk, run, fall and knockdown clips follow the movement and its real speed.
+
+```csharp
+uint npc = Assets.SpawnModel("models/mannequin/mannequin.glb", feet, rotation, Vector3.One, ModelPhysics.Character);
+var walker = new CharacterController(npc);
+walker.Move(direction * 1.5f);                  // stays in effect; add jump: true to jump once
+if (walker.State.KnockedDown) { /* hit by a car */ }
+Camera.Target = npc;                            // the camera follows a character or a vehicle
+```
+
+`GameScripts/PlayerScript.cs` is the player: on foot, in the car, and in between. Hits above 4 m/s knock a character over;
+while down, cars pass over it. Not included: crouching, climbing, swimming, ragdolls, foot IK. The on-foot player needs the
+.NET runtime.
 
 ### Characters and animation
 

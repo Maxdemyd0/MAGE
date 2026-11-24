@@ -17,6 +17,8 @@ class Engine;
 class MAGE_API Testbed {
 public:
     static constexpr const char* kVehicleScript = "GameScripts.TestVehicleScript";
+    static constexpr const char* kPlayerScript = "GameScripts.PlayerScript";
+    bool startOnFoot = false; // set before Build
 
     void Build(Engine& engine);
     void Update(Engine& engine, float dt, bool cameraInputAllowed = true);
@@ -28,11 +30,13 @@ public:
     void DrawPathTracerWindow(Engine& engine, bool* open = nullptr);
 
     Entity Vehicle() const { return m_vehicle; }
+    Entity Player() const { return m_player; }
     bool UsingNativeController(Engine& engine) const;
 
     enum class CameraMode { Chase, Fly };
     CameraMode cameraMode = CameraMode::Chase;
     ChaseCameraController chaseCamera;
+    ThirdPersonCameraController thirdPersonCamera;
     FlyCameraController flyCamera;
 
 private:
@@ -41,6 +45,8 @@ private:
     void BuildProps(Engine& engine);
 
     Entity m_vehicle = NullEntity;
+    Entity m_player = NullEntity;
+    Entity m_lastTarget = NullEntity;
     glm::vec3 m_spawnPosition{0.0f, 1.2f, -20.0f};
     float m_nativeSteer = 0.0f;
     float m_previousForward = 1.0f;

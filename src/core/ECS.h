@@ -103,6 +103,44 @@ struct RigidBodyComponent {
     glm::quat currRotation{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
+// A walking character (PhysicsWorld character). The entity's transform follows it.
+struct CharacterComponent {
+    uint32_t character = 0xFFFFFFFFu; // PhysicsWorld CharacterHandle, invalid while disabled
+    // Shape and abilities (shape changes apply when the character is enabled again).
+    float radius = 0.3f;
+    float height = 1.8f;
+    float mass = 75.0f;
+    float originHeight = 0.0f;       // entity origin above the feet
+    float jumpSpeed = 4.6f;
+    float acceleration = 22.0f;
+    float airAcceleration = 5.0f;
+    float turnSpeed = 10.0f;         // rad/s towards the movement direction
+    float knockdownSpeed = 4.0f;     // hits that change the velocity by more than this knock it over (m/s)
+    float knockdownSeconds = 2.4f;
+    bool autoAnimate = true;         // idle / walk / run / fall / knockdown clips follow the movement
+    // Input (written by scripts, consumed every fixed step).
+    glm::vec3 moveVelocity{0.0f};    // desired horizontal velocity, world space (m/s)
+    bool jump = false;               // consumed by the next fixed step
+    // State after the last fixed step.
+    bool grounded = false;
+    bool sliding = false;
+    glm::vec3 velocity{0.0f};
+    glm::vec3 groundVelocity{0.0f};
+    glm::vec3 groundNormal{0.0f, 1.0f, 0.0f};
+    float airTime = 0.0f;
+    float landingSpeed = 0.0f;       // > 0 only in the step that lands
+    float impactSpeed = 0.0f;        // > 0 only in steps where a moving body hit it
+    uint32_t impactEntity = 0xFFFFFFFFu;
+    float knockedDown = 0.0f;        // seconds left without control
+    bool startKnockdownClip = false;
+    bool running = false;            // animation hysteresis
+    // Fixed-step interpolation (feet position, heading in radians, 0 = +Z).
+    glm::vec3 prevPosition{0.0f};
+    glm::vec3 currPosition{0.0f};
+    float prevHeading = 0.0f;
+    float heading = 0.0f;
+};
+
 struct VehicleComponent {
     uint32_t vehicle = 0xFFFFFFFFu;  // PhysicsWorld VehicleHandle
     glm::vec3 bodyHalfExtents{0.9f, 0.3f, 2.2f};

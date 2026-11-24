@@ -113,6 +113,16 @@ void SamplePose(const Rig& rig, const AnimationClip& clip, float time, bool inPl
     j.translation = track->translation.values.front() + glm::inverse(toModel) * moved;
 }
 
+float ClipTravelSpeed(const Rig& rig, const AnimationClip& clip) {
+    const AnimationTrack* track = clip.motionNode >= 0 && clip.duration > 0.0f ? FindTrack(clip, clip.motionNode) : nullptr;
+    if (!track || track->translation.times.empty()) return 0.0f;
+    glm::mat4 parent(1.0f);
+    for (int n = rig.nodes[static_cast<size_t>(clip.motionNode)].parent; n >= 0; n = rig.nodes[static_cast<size_t>(n)].parent)
+        parent = rig.nodes[static_cast<size_t>(n)].rest.Matrix() * parent;
+    const glm::vec3 d = glm::mat3(parent) * (track->translation.values.back() - track->translation.values.front());
+    return glm::length(glm::vec2(d.x, d.z)) / clip.duration;
+}
+
 void BlendPoses(const Pose& a, const Pose& b, float t, Pose& out) {
     const size_t n = std::min(a.size(), b.size());
     out.resize(n);

@@ -11,7 +11,7 @@
 
 namespace mage::interop {
 
-inline constexpr uint32_t kInteropVersion = 3;
+inline constexpr uint32_t kInteropVersion = 4;
 
 struct NVec3 { float x, y, z; };
 struct NQuat { float x, y, z, w; };
@@ -29,6 +29,15 @@ struct NVehicleState {
     float engineRPM;
     int32_t gear;
     int32_t wheelsInContact;
+};
+
+struct NCharacterState {
+    NVec3 velocity;
+    NVec3 groundNormal;
+    float landingSpeed;
+    float impactSpeed;
+    uint32_t impactEntity;
+    int32_t flags;     // 1 enabled, 2 grounded, 4 sliding, 8 knocked down
 };
 
 // ---- Native functions exposed to C# (called through `delegate* unmanaged<...>`) ----
@@ -59,6 +68,13 @@ using FnLoadAnimations     = int32_t (*)(uint32_t entity, const char* utf8Path);
 using FnAnimationState     = int32_t (*)(uint32_t entity, float* time, float* duration); // 1 playing, 0 stopped / finished, -1 no animator
 using FnSetAnimation       = void (*)(uint32_t entity, float speed, int32_t inPlace);
 using FnBonePosition       = int32_t (*)(uint32_t entity, const char* utf8Bone, NVec3* position, NQuat* rotation);
+using FnSetCharacterMove    = void (*)(uint32_t entity, const NVec3* velocity, int32_t jump);
+using FnGetCharacterState   = int32_t (*)(uint32_t entity, NCharacterState* outState);
+using FnSetCharacterEnabled = int32_t (*)(uint32_t entity, int32_t enabled, const NVec3* position);
+using FnSetCharacterOptions = void (*)(uint32_t entity, float jumpSpeed, float knockdownSpeed, int32_t autoAnimate); // negative = keep
+using FnKnockDown           = void (*)(uint32_t entity, const NVec3* velocity, float seconds);
+using FnGetCamera           = uint32_t (*)(NVec3* position, NVec3* forward); // returns the camera target
+using FnSetCameraTarget     = void (*)(uint32_t entity);
 
 struct NativeBindings {
     uint32_t structSize;
@@ -86,6 +102,13 @@ struct NativeBindings {
     FnAnimationState AnimationState;
     FnSetAnimation SetAnimation;
     FnBonePosition BonePosition;
+    FnSetCharacterMove SetCharacterMove;
+    FnGetCharacterState GetCharacterState;
+    FnSetCharacterEnabled SetCharacterEnabled;
+    FnSetCharacterOptions SetCharacterOptions;
+    FnKnockDown KnockDown;
+    FnGetCamera GetCamera;
+    FnSetCameraTarget SetCameraTarget;
 };
 
 // ---- Managed entry points filled in by C# ScriptEngine.Initialize ----
@@ -104,7 +127,8 @@ static_assert(sizeof(NVec3) == 12);
 static_assert(sizeof(NQuat) == 16);
 static_assert(sizeof(NRaycastHit) == 32);
 static_assert(sizeof(NVehicleState) == 20);
-static_assert(sizeof(NativeBindings) == 8 + 23 * sizeof(void*));
+static_assert(sizeof(NCharacterState) == 40);
+static_assert(sizeof(NativeBindings) == 8 + 30 * sizeof(void*));
 static_assert(sizeof(ManagedCallbacks) == 5 * sizeof(void*));
 
 } // namespace mage::interop

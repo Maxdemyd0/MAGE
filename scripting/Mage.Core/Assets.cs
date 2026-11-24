@@ -4,7 +4,7 @@ using Mage.Interop;
 
 namespace Mage
 {
-    public enum ModelPhysics { None = 0, Static = 1, Dynamic = 2 }
+    public enum ModelPhysics { None = 0, Static = 1, Dynamic = 2, Character = 3 }
     public enum TextureSlot { BaseColor = 0, MetallicRoughness = 1, Normal = 2, Emissive = 3 }
 
     /// <summary>Imported files. Paths are relative to the asset folder (or absolute).</summary>

@@ -310,6 +310,7 @@ void Engine::Run() {
         FlushDestroyQueue();
         {
             MAGE_PROFILE_SCOPE(m_profiler, "Animation");
+            AnimateCharacters();
             const float animDt = simulationPaused ? static_cast<float>(steps * fixedDt) : static_cast<float>(frameDt) * timeScale;
             m_animation->Update(m_registry, *m_assets, m_renderer->Meshes(), animDt);
         }
@@ -347,6 +348,8 @@ void Engine::FixedStep(float dt) {
         m_physics->SetVehicleInput(v.vehicle, v.throttle, v.steering, v.brake, v.handBrake);
     });
 
+    UpdateCharacters(dt);
+
     {
         MAGE_PROFILE_SCOPE(m_profiler, "Physics.Step");
         m_physics->Step(dt);
@@ -360,7 +363,146 @@ void Engine::FixedStep(float dt) {
     });
 }
 
+// ============================================================================ Characters
+namespace {
+float WrapPi(float a) { return std::remainder(a, 6.28318531f); }
+glm::quat HeadingRotation(float heading) { return glm::angleAxis(heading, glm::vec3(0, 1, 0)); }
+float HeadingOf(const glm::quat& q) {
+    const glm::vec3 f = q * glm::vec3(0, 0, 1);
+    return std::atan2(f.x, f.z);
+}
+} // namespace
+
+void Engine::UpdateCharacters(float dt) {
+    MAGE_PROFILE_SCOPE(m_profiler, "Characters");
+    m_registry.Each<CharacterComponent>([&](Entity e, CharacterComponent& c) {
+        if (c.character == InvalidCharacter) return;
+        const bool down = c.knockedDown > 0.0f;
+        if (down) {
+            // The last moments pass only on the ground and with room to stand up (not under a car).
+            const float next = c.knockedDown - dt;
+            const bool mayRise = next > 0.4f || (c.grounded && (next > 0.0f || m_physics->CharacterFits(c.radius, c.height, c.currPosition, m_physics->GetCharacterBody(c.character))));
+            c.knockedDown = mayRise ? std::max(next, 0.0f) : std::max(c.knockedDown, 0.01f);
+        }
+
+        CharacterMove move;
+        move.velocity = down ? glm::vec3(0.0f) : c.moveVelocity;
+        move.acceleration = down ? 6.0f : c.acceleration; // slides to a halt
+        move.airAcceleration = down ? 0.0f : c.airAcceleration;
+        move.passThroughVehicles = down;
+        move.jumpSpeed = c.jump && !down ? c.jumpSpeed : 0.0f;
+        c.jump = false;
+        const CharacterState s = m_physics->UpdateCharacter(c.character, move, dt);
+
+        c.prevPosition = c.currPosition;
+        c.prevHeading = c.heading;
+        c.currPosition = s.position;
+        c.grounded = s.grounded;
+        c.sliding = s.sliding;
+        c.velocity = s.velocity;
+        c.groundVelocity = s.groundVelocity;
+        c.groundNormal = s.groundNormal;
+        c.airTime = s.grounded ? 0.0f : c.airTime + dt;
+        c.landingSpeed = s.landingSpeed;
+        c.impactSpeed = s.impactSpeed;
+        c.impactEntity = s.impactSpeed > 0.0f ? static_cast<Entity>(s.impactUserData) : NullEntity;
+
+        if (!down && glm::length(glm::vec2(c.moveVelocity.x, c.moveVelocity.z)) > 0.1f) {
+            const float target = std::atan2(c.moveVelocity.x, c.moveVelocity.z);
+            c.heading += std::clamp(WrapPi(target - c.heading), -c.turnSpeed * dt, c.turnSpeed * dt);
+        }
+        if (!down && s.impactSpeed > c.knockdownSpeed) {
+            glm::vec3 launch = s.impactDirection * s.impactSpeed;
+            launch.y = std::max(launch.y, 0.0f) + std::min(s.impactSpeed * 0.25f, 4.0f);
+            KnockDown(e, launch, 0.0f);
+        }
+    });
+}
+
+void Engine::KnockDown(Entity e, const glm::vec3& velocity, float seconds) {
+    auto* c = m_registry.TryGet<CharacterComponent>(e);
+    if (!c || c->character == InvalidCharacter) return;
+    m_physics->SetCharacterVelocity(c->character, velocity);
+    c->knockedDown = seconds > 0.0f ? seconds : c->knockdownSeconds;
+    c->startKnockdownClip = true;
+    // Falls backwards, away from what hit it.
+    if (glm::length(glm::vec2(velocity.x, velocity.z)) > 0.1f) c->heading = c->prevHeading = std::atan2(-velocity.x, -velocity.z);
+}
+
+bool Engine::SetCharacterEnabled(Entity e, bool enabled, const glm::vec3& position) {
+    auto* c = m_registry.TryGet<CharacterComponent>(e);
+    auto* t = m_registry.TryGet<TransformComponent>(e);
+    if (!c || !t) return false;
+    if (enabled) {
+        const BodyHandle self = c->character != InvalidCharacter ? m_physics->GetCharacterBody(c->character) : InvalidBody;
+        if (!m_physics->CharacterFits(c->radius, c->height, position, self)) return false;
+        if (c->character != InvalidCharacter) m_physics->DestroyCharacter(c->character);
+        CharacterDesc d;
+        d.position = position;
+        d.radius = c->radius;
+        d.height = c->height;
+        d.mass = c->mass;
+        c->character = m_physics->CreateCharacter(d, e);
+        if (c->character == InvalidCharacter) return false;
+        c->prevPosition = c->currPosition = position;
+        c->heading = c->prevHeading = HeadingOf(t->rotation);
+        c->velocity = c->groundVelocity = c->moveVelocity = glm::vec3(0.0f);
+        c->knockedDown = c->airTime = c->impactSpeed = c->landingSpeed = 0.0f;
+        c->jump = c->grounded = c->startKnockdownClip = false;
+        t->position = position + glm::vec3(0.0f, c->originHeight, 0.0f);
+    } else if (c->character != InvalidCharacter) {
+        m_physics->DestroyCharacter(c->character);
+        c->character = InvalidCharacter;
+        c->grounded = false;
+        c->velocity = glm::vec3(0.0f);
+    }
+    if (auto* mc = m_registry.TryGet<ModelComponent>(e)) mc->visible = enabled;
+    if (auto* mc = m_registry.TryGet<MeshComponent>(e)) mc->visible = enabled;
+    return true;
+}
+
+// Picks clips by name from the movement: idle, walk, run, fall, knockdown (missing ones are skipped).
+void Engine::AnimateCharacters() {
+    m_registry.Each<CharacterComponent, AnimatorComponent, ModelComponent>([&](Entity e, CharacterComponent& c, AnimatorComponent& a, ModelComponent& mc) {
+        const Model* model = m_assets->GetModel(mc.model);
+        if (!model || !c.autoAnimate || c.character == InvalidCharacter) return;
+        const Rig& rig = model->rig;
+        const int idle = rig.FindClip("idle"), walk = rig.FindClip("walk"), run = rig.FindClip("run");
+        if (c.startKnockdownClip) {
+            c.startKnockdownClip = false;
+            PlayClip(a, rig, rig.FindClip("knockdown"), 0.08f, false, 1.0f);
+        }
+        if (c.knockedDown > 0.0f) return;
+        if (!c.grounded && c.airTime > 0.15f) {
+            if (PlayClip(a, rig, rig.FindClip("fall"), 0.2f, true, 1.0f)) return;
+        }
+        const glm::vec3 relative = c.velocity - c.groundVelocity;
+        const float speed = glm::length(glm::vec2(relative.x, relative.z));
+        if (speed < 0.15f) {
+            PlayClip(a, rig, idle, 0.2f, true, 1.0f);
+            return;
+        }
+        const auto* t = m_registry.TryGet<TransformComponent>(e);
+        const float scale = t ? std::max(std::abs(t->scale.z), 1e-3f) : 1.0f;
+        auto natural = [&](int clip, float fallback) {
+            const float v = clip >= 0 ? ClipTravelSpeed(rig, rig.clips[static_cast<size_t>(clip)]) : 0.0f;
+            return v > 0.1f ? v * scale : fallback;
+        };
+        const float walkSpeed = natural(walk, 1.4f), runSpeed = natural(run, 4.2f);
+        const float middle = (walkSpeed + runSpeed) * 0.5f;
+        c.running = speed > middle * (c.running ? 0.9f : 1.1f);
+        int clip = c.running ? run : walk;
+        if (clip < 0) clip = c.running ? walk : run;
+        PlayClip(a, rig, clip, 0.2f, true, std::clamp(speed / (clip == run ? runSpeed : walkSpeed), 0.4f, 2.5f));
+    });
+}
+
 void Engine::InterpolateTransforms(float alpha) {
+    m_registry.Each<CharacterComponent, TransformComponent>([&](Entity, CharacterComponent& c, TransformComponent& t) {
+        if (c.character == InvalidCharacter) return;
+        t.position = glm::mix(c.prevPosition, c.currPosition, alpha) + glm::vec3(0.0f, c.originHeight, 0.0f);
+        t.rotation = HeadingRotation(c.prevHeading + WrapPi(c.heading - c.prevHeading) * alpha);
+    });
     m_registry.Each<RigidBodyComponent, TransformComponent>([&](Entity, RigidBodyComponent& rb, TransformComponent& t) {
         if (rb.motion == BodyMotion::Static) return;
         t.position = glm::mix(rb.prevPosition, rb.currPosition, alpha);
@@ -653,7 +795,9 @@ void Engine::DestroyEntityNow(Entity e) {
     if (auto* s = m_registry.TryGet<ScriptComponent>(e); s && s->instantiated) m_scripts->DestroyInstance(e);
     if (auto* v = m_registry.TryGet<VehicleComponent>(e)) m_physics->DestroyVehicle(v->vehicle);
     if (auto* rb = m_registry.TryGet<RigidBodyComponent>(e)) m_physics->DestroyBody(rb->body);
+    if (auto* c = m_registry.TryGet<CharacterComponent>(e)) m_physics->DestroyCharacter(c->character);
     if (m_streamingFocus == e) m_streamingFocus = NullEntity;
+    if (m_cameraTarget == e) m_cameraTarget = NullEntity;
     m_registry.Destroy(e);
 }
 
@@ -704,7 +848,19 @@ Entity Engine::SpawnPrimitive(const SpawnDesc& d) {
     if (!d.texture.empty()) m.baseColorTexture = m_assets->LoadTexture(d.texture);
     }
 
-    if (d.physics != SpawnPhysics::None) {
+    if (d.physics == SpawnPhysics::Character) {
+        auto& c = m_registry.Add<CharacterComponent>(e);
+        AABB box{glm::vec3(-0.5f), glm::vec3(0.5f)};
+        if (model) box = model->bounds;
+        const glm::vec3 scale = glm::abs(d.scale);
+        c.height = std::clamp((box.max.y - box.min.y) * scale.y, 0.4f, 10.0f);
+        c.radius = std::min(0.3f * c.height / 1.8f, c.height * 0.45f);
+        c.originHeight = -box.min.y * scale.y;
+        if (d.mass > 0.0f) c.mass = d.mass;
+        if (auto* a = m_registry.TryGet<AnimatorComponent>(e)) a->inPlace = true;
+        if (!d.animation.empty()) c.autoAnimate = false; // an explicit clip wins
+        if (!SetCharacterEnabled(e, true, d.position - glm::vec3(0.0f, c.originHeight, 0.0f))) Log::Warn("Character '{}' has no room to stand and starts disabled", d.name);
+    } else if (d.physics != SpawnPhysics::None) {
         BodyDesc b;
         b.shape = ShapeForMesh(d.mesh);
         const glm::vec3 s = glm::abs(d.scale);
@@ -771,6 +927,11 @@ Entity Engine::SpawnVehicle(const std::string& name, const VehicleDesc& desc, co
 }
 
 bool Engine::GetEntityTransform(Entity e, glm::vec3& position, glm::quat& rotation) const {
+    if (const auto* c = m_registry.TryGet<CharacterComponent>(e); c && c->character != InvalidCharacter) {
+        position = c->currPosition + glm::vec3(0.0f, c->originHeight, 0.0f);
+        rotation = HeadingRotation(c->heading);
+        return true;
+    }
     if (const auto* rb = m_registry.TryGet<RigidBodyComponent>(e); rb && rb->motion != BodyMotion::Static) {
         position = rb->currPosition; // latest simulated pose (not the render interpolation)
         rotation = rb->currRotation;
@@ -789,6 +950,11 @@ void Engine::SetEntityTransform(Entity e, const glm::vec3& position, const glm::
     if (auto* t = m_registry.TryGet<TransformComponent>(e)) {
         t->position = position;
         t->rotation = r;
+    }
+    if (auto* c = m_registry.TryGet<CharacterComponent>(e); c && c->character != InvalidCharacter) {
+        c->prevPosition = c->currPosition = position - glm::vec3(0.0f, c->originHeight, 0.0f);
+        c->heading = c->prevHeading = HeadingOf(r);
+        m_physics->SetCharacterPosition(c->character, c->currPosition);
     }
     if (auto* rb = m_registry.TryGet<RigidBodyComponent>(e)) {
         m_physics->SetBodyTransform(rb->body, position, r, true);
@@ -829,6 +995,7 @@ void Engine::OnSectorLoaded(const SectorData& data) {
         s.animationFiles = d.animationFiles;
         s.mass = d.mass;
         s.physics = d.physics == SectorPhysics::Dynamic ? SpawnPhysics::Dynamic
+                  : d.physics == SectorPhysics::Character ? SpawnPhysics::Character
                   : d.physics == SectorPhysics::Static  ? SpawnPhysics::Static
                                                         : SpawnPhysics::None;
         const Entity e = SpawnPrimitive(s);

@@ -63,6 +63,11 @@ bool Window::Create(const std::string& title, int width, int height, bool vsync,
 
 std::vector<std::filesystem::path> Window::TakeDroppedFiles() { return std::exchange(s_dropped, {}); }
 
+void Window::SetCursorCaptured(bool captured) {
+    if (m_window) glfwSetInputMode(m_window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+bool Window::CursorCaptured() const { return m_window && glfwGetInputMode(m_window, GLFW_CURSOR) == GLFW_CURSOR_DISABLED; }
+
 void Window::Destroy() {
     if (m_window) {
         glfwDestroyWindow(m_window);

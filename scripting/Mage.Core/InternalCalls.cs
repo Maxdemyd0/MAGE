@@ -30,6 +30,17 @@ namespace Mage.Interop
         public int WheelsInContact;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativeCharacterState
+    {
+        public Vector3 Velocity;
+        public Vector3 GroundNormal;
+        public float LandingSpeed;
+        public float ImpactSpeed;
+        public uint ImpactEntity;
+        public int Flags;
+    }
+
     /// <summary>Native engine functions handed to C# by ScriptHost.cpp.</summary>
     [StructLayout(LayoutKind.Sequential)]
     public unsafe struct NativeBindings
@@ -59,6 +70,13 @@ namespace Mage.Interop
         public delegate* unmanaged<uint, float*, float*, int> AnimationState;
         public delegate* unmanaged<uint, float, int, void> SetAnimation;
         public delegate* unmanaged<uint, byte*, Vector3*, Quaternion*, int> BonePosition;
+        public delegate* unmanaged<uint, Vector3*, int, void> SetCharacterMove;
+        public delegate* unmanaged<uint, NativeCharacterState*, int> GetCharacterState;
+        public delegate* unmanaged<uint, int, Vector3*, int> SetCharacterEnabled;
+        public delegate* unmanaged<uint, float, float, int, void> SetCharacterOptions;
+        public delegate* unmanaged<uint, Vector3*, float, void> KnockDown;
+        public delegate* unmanaged<Vector3*, Vector3*, uint> GetCamera;
+        public delegate* unmanaged<uint, void> SetCameraTarget;
     }
 
     /// <summary>Managed lifecycle entry points that C# hands back to the engine.</summary>
@@ -78,7 +96,7 @@ namespace Mage.Interop
     /// </summary>
     internal static unsafe class InternalCalls
     {
-        public const uint InteropVersion = 3;
+        public const uint InteropVersion = 4;
         public const uint InvalidEntity = 0xFFFFFFFF;
 
         private static NativeBindings s_native;
@@ -217,6 +235,31 @@ namespace Mage.Interop
             rotation = q;
             return ok;
         }
+
+        public static void SetCharacterMove(uint entity, Vector3 velocity, bool jump) => s_native.SetCharacterMove(entity, &velocity, jump ? 1 : 0);
+
+        public static bool GetCharacterState(uint entity, out NativeCharacterState state)
+        {
+            NativeCharacterState s = default;
+            bool ok = s_native.GetCharacterState(entity, &s) != 0;
+            state = s;
+            return ok;
+        }
+
+        public static bool SetCharacterEnabled(uint entity, bool enabled, Vector3 position) => s_native.SetCharacterEnabled(entity, enabled ? 1 : 0, &position) != 0;
+        public static void SetCharacterOptions(uint entity, float jumpSpeed, float knockdownSpeed, int autoAnimate) => s_native.SetCharacterOptions(entity, jumpSpeed, knockdownSpeed, autoAnimate);
+        public static void KnockDown(uint entity, Vector3 velocity, float seconds) => s_native.KnockDown(entity, &velocity, seconds);
+
+        public static uint GetCamera(out Vector3 position, out Vector3 forward)
+        {
+            Vector3 p = default, f = default;
+            uint target = s_native.GetCamera(&p, &f);
+            position = p;
+            forward = f;
+            return target;
+        }
+
+        public static void SetCameraTarget(uint entity) => s_native.SetCameraTarget(entity);
 
         public static int LoadFont(string path, float size)
         {

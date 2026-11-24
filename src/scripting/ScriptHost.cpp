@@ -90,6 +90,7 @@ int32_t Native_RaycastWorld(const NVec3* origin, const NVec3* direction, float m
 
     BodyHandle ignore = InvalidBody;
     if (const auto* rb = s_engine->GetRegistry().TryGet<RigidBodyComponent>(ignoreEntity)) ignore = rb->body;
+    else if (const auto* c = s_engine->GetRegistry().TryGet<CharacterComponent>(ignoreEntity)) ignore = s_engine->GetPhysics().GetCharacterBody(c->character);
 
     RaycastHit hit;
     if (!s_engine->GetPhysics().Raycast(ToGlm(*origin), dir, maxDistance, hit, ignore)) return 0;
@@ -128,7 +129,7 @@ uint32_t Native_SpawnModel(const char* path, const NVec3* position, const NQuat*
     if (position) d.position = ToGlm(*position);
     if (rotation) d.rotation = glm::normalize(ToGlm(*rotation));
     if (scale) d.scale = ToGlm(*scale);
-    d.physics = physics == 2 ? SpawnPhysics::Dynamic : physics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
+    d.physics = physics == 3 ? SpawnPhysics::Character : physics == 2 ? SpawnPhysics::Dynamic : physics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
     return s_engine->SpawnPrimitive(d);
 }
 int32_t Native_SetEntityTexture(uint32_t entity, int32_t slot, const char* path) {
@@ -182,6 +183,42 @@ int32_t Native_BonePosition(uint32_t entity, const char* bone, NVec3* position, 
     if (position) *position = NVec3{p.translation.x, p.translation.y, p.translation.z};
     if (rotation) *rotation = NQuat{p.rotation.x, p.rotation.y, p.rotation.z, p.rotation.w};
     return 1;
+}
+
+void Native_SetCharacterMove(uint32_t entity, const NVec3* velocity, int32_t jump) {
+    if (auto* c = s_engine->GetRegistry().TryGet<CharacterComponent>(entity); c && velocity) {
+        c->moveVelocity = ToGlm(*velocity);
+        c->jump |= jump != 0;
+    }
+}
+int32_t Native_GetCharacterState(uint32_t entity, NCharacterState* out) {
+    const auto* c = s_engine->GetRegistry().TryGet<CharacterComponent>(entity);
+    if (!c || !out) return 0;
+    *out = NCharacterState{ToNative(c->velocity), ToNative(c->groundNormal), c->landingSpeed, c->impactSpeed,
+                           s_engine->GetRegistry().Valid(c->impactEntity) ? c->impactEntity : NullEntity,
+                           (c->character != InvalidCharacter ? 1 : 0) | (c->grounded ? 2 : 0) | (c->sliding ? 4 : 0) | (c->knockedDown > 0.0f ? 8 : 0)};
+    return 1;
+}
+int32_t Native_SetCharacterEnabled(uint32_t entity, int32_t enabled, const NVec3* position) {
+    return s_engine->SetCharacterEnabled(entity, enabled != 0, position ? ToGlm(*position) : glm::vec3(0.0f)) ? 1 : 0;
+}
+void Native_SetCharacterOptions(uint32_t entity, float jumpSpeed, float knockdownSpeed, int32_t autoAnimate) {
+    if (auto* c = s_engine->GetRegistry().TryGet<CharacterComponent>(entity)) {
+        if (jumpSpeed >= 0.0f) c->jumpSpeed = jumpSpeed;
+        if (knockdownSpeed >= 0.0f) c->knockdownSpeed = knockdownSpeed;
+        if (autoAnimate >= 0) c->autoAnimate = autoAnimate != 0;
+    }
+}
+void Native_KnockDown(uint32_t entity, const NVec3* velocity, float seconds) {
+    s_engine->KnockDown(entity, velocity ? ToGlm(*velocity) : glm::vec3(0.0f), seconds);
+}
+uint32_t Native_GetCamera(NVec3* position, NVec3* forward) {
+    if (position) *position = ToNative(s_engine->GetCamera().position);
+    if (forward) *forward = ToNative(s_engine->GetCamera().Forward());
+    return s_engine->GetCameraTarget();
+}
+void Native_SetCameraTarget(uint32_t entity) {
+    if (s_engine->GetRegistry().Valid(entity)) s_engine->SetCameraTarget(entity);
 }
 
 #ifdef MAGE_HAS_DOTNET
@@ -312,6 +349,13 @@ bool ScriptHost::Init(Engine& engine, const std::filesystem::path& scriptDirecto
     bindings.AnimationState = &Native_AnimationState;
     bindings.SetAnimation = &Native_SetAnimation;
     bindings.BonePosition = &Native_BonePosition;
+    bindings.SetCharacterMove = &Native_SetCharacterMove;
+    bindings.GetCharacterState = &Native_GetCharacterState;
+    bindings.SetCharacterEnabled = &Native_SetCharacterEnabled;
+    bindings.SetCharacterOptions = &Native_SetCharacterOptions;
+    bindings.KnockDown = &Native_KnockDown;
+    bindings.GetCamera = &Native_GetCamera;
+    bindings.SetCameraTarget = &Native_SetCameraTarget;
 
     m_callbacks = {};
     const int32_t initResult = managedInit(&bindings, &m_callbacks);

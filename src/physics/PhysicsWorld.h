@@ -10,6 +10,8 @@
 //   STATIC_WORLD  - ground, ramps, buildings (never moves, broadphase NON_MOVING)
 //   DYNAMIC_PROP  - crates, cones, spheres
 //   VEHICLE       - vehicle chassis (wheels are ray-cast, not bodies)
+//   CHARACTER     - query body of walking characters: raycasts see it, rigid bodies do not (the
+//                   character itself collides with them, so a car is not stopped by a pedestrian)
 //   RAGDOLL       - reserved for ragdoll parts (collide with everything but STATIC-vs-STATIC)
 
 #include <cstdint>
@@ -23,7 +25,7 @@ namespace mage {
 
 class Renderer;
 
-enum class ObjectLayer : uint16_t { StaticWorld = 0, DynamicProp = 1, Vehicle = 2, Ragdoll = 3, Count = 4 };
+enum class ObjectLayer : uint16_t { StaticWorld = 0, DynamicProp = 1, Vehicle = 2, Ragdoll = 3, Character = 4, Count = 5 };
 enum class MotionType : uint8_t { Static, Kinematic, Dynamic };
 enum class ShapeType : uint8_t { Box, Sphere, Cylinder, Capsule, ConvexHull, Mesh };
 
@@ -89,6 +91,41 @@ struct VehicleTelemetry {
     int wheelsInContact = 0;
 };
 
+using CharacterHandle = uint32_t;
+inline constexpr CharacterHandle InvalidCharacter = 0xFFFFFFFFu;
+
+struct CharacterDesc {
+    glm::vec3 position{0.0f};        // feet
+    float radius = 0.3f;
+    float height = 1.8f;             // total, including the caps
+    float mass = 75.0f;
+    float maxSlopeDegrees = 48.0f;   // steeper ground makes the character slide
+    float stepHeight = 0.4f;         // stairs and curbs up to this height are walked over
+    float pushForce = 250.0f;        // N, pushing rigid bodies
+};
+
+struct CharacterMove {
+    glm::vec3 velocity{0.0f};        // desired horizontal velocity (m/s), relative to the ground
+    float jumpSpeed = 0.0f;          // > 0: jump now if standing on the ground
+    float acceleration = 25.0f;      // m/s^2 on the ground
+    float airAcceleration = 6.0f;
+    bool passThroughVehicles = false; // knocked down: cars run over it instead of pushing it along
+};
+
+struct CharacterState {
+    glm::vec3 position{0.0f};        // feet
+    glm::vec3 velocity{0.0f};        // actual movement during the last update
+    glm::vec3 groundVelocity{0.0f};  // of the surface under the feet (moving platforms, vehicles)
+    glm::vec3 groundNormal{0.0f, 1.0f, 0.0f};
+    bool grounded = false;
+    bool sliding = false;            // on ground that is too steep
+    bool jumped = false;             // left the ground by jumping in this update
+    float landingSpeed = 0.0f;       // > 0 in the update that touches down (m/s)
+    float impactSpeed = 0.0f;        // velocity change (m/s) a moving body caused, 0 = not hit
+    glm::vec3 impactDirection{0.0f};
+    uint64_t impactUserData = 0;
+};
+
 struct PhysicsStats {
     uint32_t numBodies = 0;
     uint32_t numActiveBodies = 0;
@@ -140,6 +177,16 @@ public:
     glm::mat4 GetWheelLocalTransform(VehicleHandle vehicle, int wheel) const;
     float GetWheelRadius(VehicleHandle vehicle) const;
     float GetWheelWidth(VehicleHandle vehicle) const;
+
+    // Walking characters (capsule, stairs, slopes, moving ground). Call UpdateCharacter once per fixed
+    // step, before Step().
+    CharacterHandle CreateCharacter(const CharacterDesc& desc, uint64_t userData);
+    void DestroyCharacter(CharacterHandle character);
+    CharacterState UpdateCharacter(CharacterHandle character, const CharacterMove& move, float dt);
+    void SetCharacterPosition(CharacterHandle character, const glm::vec3& feet); // teleport
+    void SetCharacterVelocity(CharacterHandle character, const glm::vec3& velocity);
+    BodyHandle GetCharacterBody(CharacterHandle character) const; // for Raycast's ignoreBody
+    bool CharacterFits(float radius, float height, const glm::vec3& feet, BodyHandle ignore = InvalidBody) const;
 
     void SetGravity(const glm::vec3& gravity);
     glm::vec3 GetGravity() const;

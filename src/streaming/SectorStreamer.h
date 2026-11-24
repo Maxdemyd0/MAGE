@@ -39,7 +39,7 @@ struct SectorCoordHash {
     }
 };
 
-enum class SectorPhysics : uint8_t { None, Static, Dynamic };
+enum class SectorPhysics : uint8_t { None, Static, Dynamic, Character };
 
 struct SectorEntityDesc {
     std::string name = "Prop";

@@ -40,10 +40,11 @@ public:
     bool GameInputEnabled() const { return m_gameInput; }
 
     // Synthetic key state (demo / autopilot / automated tests). OR-ed with the real keyboard.
+    // Takes effect on the next frame, so that everything in that frame sees the same key edges.
     void InjectKey(int key, bool down) {
-        if (key >= 0 && key < kMaxKeys) m_injected[key] = down ? 1 : 0;
+        if (key >= 0 && key < kMaxKeys) m_pendingInjected[key] = down ? 1 : 0;
     }
-    void ClearInjectedKeys() { m_injected.fill(0); }
+    void ClearInjectedKeys() { m_pendingInjected.fill(0); }
 
 private:
     static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
@@ -53,6 +54,7 @@ private:
     std::array<uint8_t, kMaxKeys> m_keys{};
     std::array<uint8_t, kMaxKeys> m_prevKeys{};
     std::array<uint8_t, kMaxKeys> m_injected{};
+    std::array<uint8_t, kMaxKeys> m_pendingInjected{};
     std::array<uint8_t, kMaxKeys> m_prevInjected{};
     std::array<uint8_t, kMaxButtons> m_buttons{};
     std::array<uint8_t, kMaxButtons> m_prevButtons{};

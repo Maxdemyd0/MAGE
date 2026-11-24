@@ -299,6 +299,17 @@ private:
             ImGui::Checkbox("Cast shadows##model", &mc->castShadows);
         }
 
+        if (auto* c = reg.TryGet<CharacterComponent>(e); c && ImGui::CollapsingHeader("Character", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const glm::vec3 v = c->velocity;
+            ImGui::Text("%s  %.2f m/s  (%.2f x %.2f m)", c->character == InvalidCharacter ? "disabled" : c->knockedDown > 0.0f ? "knocked down" : c->grounded ? "grounded" : c->sliding ? "sliding" : "in the air",
+                        glm::length(v), c->radius * 2.0f, c->height);
+            ImGui::SliderFloat("Jump speed", &c->jumpSpeed, 0.0f, 12.0f);
+            ImGui::SliderFloat("Acceleration", &c->acceleration, 1.0f, 80.0f);
+            ImGui::SliderFloat("Air acceleration", &c->airAcceleration, 0.0f, 30.0f);
+            ImGui::SliderFloat("Knockdown (m/s)", &c->knockdownSpeed, 1.0f, 30.0f);
+            ImGui::Checkbox("Animate from movement", &c->autoAnimate);
+        }
+
         if (auto* a = reg.TryGet<AnimatorComponent>(e); a && ImGui::CollapsingHeader("Animator", ImGuiTreeNodeFlags_DefaultOpen)) DrawAnimator(e, *a);
 
         if (rb && ImGui::CollapsingHeader("Rigid Body (Jolt)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -568,8 +579,8 @@ private:
         ImGui::Combo("Texture slot", &m_textureSlot, kSlots, 4);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(130.0f);
-        static const char* kPhysics[] = {"No collision", "Static mesh", "Dynamic hull"};
-        ImGui::Combo("Model physics", &m_modelPhysics, kPhysics, 3);
+        static const char* kPhysics[] = {"No collision", "Static mesh", "Dynamic hull", "Walking character"};
+        ImGui::Combo("Model physics", &m_modelPhysics, kPhysics, 4);
         ImGui::Separator();
         ImGui::BeginChild("##assetlist");
         for (size_t i = 0; i < m_assetList.size(); ++i) {
@@ -601,7 +612,7 @@ private:
             d.model = a.path;
             const Camera& cam = m_engine.GetCamera();
             d.position = cam.position + cam.Forward() * 8.0f;
-            d.physics = m_modelPhysics == 2 ? SpawnPhysics::Dynamic : m_modelPhysics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
+            d.physics = m_modelPhysics == 3 ? SpawnPhysics::Character : m_modelPhysics == 2 ? SpawnPhysics::Dynamic : m_modelPhysics == 1 ? SpawnPhysics::Static : SpawnPhysics::None;
             const Entity e = m_engine.SpawnPrimitive(d);
             if (e != NullEntity) m_selected = e;
             else m_importStatus = "Could not load " + a.path + " (see Console)";

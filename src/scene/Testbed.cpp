@@ -3,6 +3,7 @@
 #include "scene/Testbed.h"
 #include "core/Engine.h"
 #include "core/Log.h"
+#include "core/Window.h"
 #include "renderer/Renderer.h"
 #include "raytracing/PathTracer.h"
 #include "scripting/ScriptHost.h"
@@ -57,7 +58,19 @@ void Testbed::Build(Engine& engine) {
     desc.position = m_spawnPosition;
     desc.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
     m_vehicle = engine.SpawnVehicle("Vehicle", desc, glm::vec3(0.78f, 0.07f, 0.05f), kVehicleScript);
-    engine.SetStreamingFocus(m_vehicle);
+    engine.SetCameraTarget(m_vehicle);
+
+    // The player character; its script drives the car and walks around.
+    SpawnDesc player;
+    player.name = "Player";
+    player.model = "models/mannequin/mannequin.glb";
+    player.physics = SpawnPhysics::Character;
+    player.position = m_spawnPosition + glm::vec3(-3.0f, -1.2f, 0.0f);
+    m_player = engine.SpawnPrimitive(player);
+    if (m_player != NullEntity) {
+        if (!startOnFoot) engine.SetCharacterEnabled(m_player, false, {});
+        engine.GetRegistry().Add<ScriptComponent>(m_player).className = kPlayerScript;
+    }
 
     engine.GetPhysics().OptimizeBroadPhase();
     engine.StartScripts();
@@ -66,7 +79,8 @@ void Testbed::Build(Engine& engine) {
         Log::Warn("Vehicle uses the native C++ fallback controller (C# scripting not available)");
     else
         Log::Info("Vehicle is driven by C# script '{}'", kVehicleScript);
-    Log::Info("Controls: W/S throttle-brake, A/D steer, Space handbrake, R reset, E spawn crate, F1 physics wireframe, F2 camera");
+    Log::Info("Controls: W/S throttle-brake, A/D steer, Space handbrake, R reset, E spawn crate, F enter/leave car, V mouse look, F1 physics wireframe, F2 camera");
+    Log::Info("On foot: W/A/S/D run, Left Alt walk, Left Shift sprint, Space jump");
 }
 
 void Testbed::BuildGround(Engine& engine) {
@@ -195,13 +209,36 @@ void Testbed::Update(Engine& engine, float dt, bool cameraInputAllowed) {
     if (input.IsKeyPressed(GLFW_KEY_F2)) {
         cameraMode = cameraMode == CameraMode::Chase ? CameraMode::Fly : CameraMode::Chase;
         if (cameraMode == CameraMode::Fly) flyCamera.SyncFrom(engine.GetCamera());
-        else chaseCamera.Reset();
+        else { chaseCamera.Reset(); thirdPersonCamera.Reset(); }
     }
+    if (input.IsKeyPressed(GLFW_KEY_V)) engine.GetWindow().SetCursorCaptured(!engine.GetWindow().CursorCaptured());
     if (UsingNativeController(engine) && input.IsKeyPressed(GLFW_KEY_R)) ResetVehicle(engine);
 
     Camera& camera = engine.GetCamera();
-    const auto* t = engine.GetRegistry().TryGet<TransformComponent>(m_vehicle);
-    if (cameraMode == CameraMode::Chase && t)
+    const Entity target = engine.GetRegistry().Valid(engine.GetCameraTarget()) ? engine.GetCameraTarget() : m_vehicle;
+    if (target != m_lastTarget) {
+        chaseCamera.Reset();
+        thirdPersonCamera.Reset();
+        m_lastTarget = target;
+    }
+    const auto* t = engine.GetRegistry().TryGet<TransformComponent>(target);
+    const auto* c = engine.GetRegistry().TryGet<CharacterComponent>(target);
+    if (cameraMode == CameraMode::Chase && t && c) {
+        const PhysicsWorld& physics = engine.GetPhysics();
+        const BodyHandle self = physics.GetCharacterBody(c->character);
+        thirdPersonCamera.Update(camera, input, t->position - glm::vec3(0.0f, c->originHeight, 0.0f), c->velocity, c->heading, dt, cameraInputAllowed,
+                                 engine.GetWindow().CursorCaptured(), [&](const glm::vec3& from, const glm::vec3& dir, float maxDistance) {
+                                     // Several rays, so that the near plane does not cut into a wall edge.
+                                     constexpr float kMargin = 0.25f;
+                                     const glm::vec3 side = glm::normalize(glm::cross(dir, std::abs(dir.y) > 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0)));
+                                     const glm::vec3 up = glm::cross(side, dir);
+                                     float best = maxDistance;
+                                     RaycastHit hit;
+                                     for (const glm::vec3& o : {glm::vec3(0.0f), side * 0.12f, -side * 0.12f, up * 0.12f, -up * 0.12f})
+                                         if (physics.Raycast(from + o, dir, maxDistance + kMargin, hit, self)) best = std::min(best, std::max(hit.distance - kMargin, 0.0f));
+                                     return best;
+                                 });
+    } else if (cameraMode == CameraMode::Chase && t)
         chaseCamera.Update(camera, input, t->position, t->rotation, dt, cameraInputAllowed);
     else
         flyCamera.Update(camera, input, dt, cameraInputAllowed);
@@ -294,6 +331,7 @@ void Testbed::DrawTuningWindow(Engine& engine, bool* open) {
     ImGui::SeparatorText("Controls");
     ImGui::TextDisabled("W/S throttle & brake/reverse, A/D steer, Space handbrake\n"
                         "R reset, E spawn crate (C#), F2 chase/fly camera, F3 path tracing,\n"
+                        "F enter/leave car, V mouse look; on foot: WASD, Shift sprint, Alt walk, Space jump\n"
                         "RMB orbit, wheel zoom");
     ImGui::End();
 }

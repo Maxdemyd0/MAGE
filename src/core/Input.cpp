@@ -31,6 +31,7 @@ void Input::ScrollCallback(GLFWwindow*, double, double dy) {
 void Input::BeginFrame() {
     m_prevKeys = m_keys;
     m_prevInjected = m_injected;
+    m_injected = m_pendingInjected;
     m_prevButtons = m_buttons;
     m_scrollAccum = 0.0f;
 }

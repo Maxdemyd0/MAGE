@@ -3,6 +3,7 @@
 #include "raytracing/VulkanContext.h"
 #include "core/Log.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -74,7 +75,7 @@ bool Context::Init(std::string& error) {
     vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
-    int bestScore = -1;
+    int64_t bestScore = -1;
     for (VkPhysicalDevice pd : devices) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(pd, &props);
@@ -99,7 +100,13 @@ bool Context::Init(std::string& error) {
             if ((qfs[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && qfs[i].timestampValidBits > 0) { family = static_cast<int>(i); break; }
         if (family < 0) continue;
 
-        const int score = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 : 1;
+        // Discrete GPUs first, then the one with the most memory (the enumeration order is arbitrary).
+        VkPhysicalDeviceMemoryProperties memory{};
+        vkGetPhysicalDeviceMemoryProperties(pd, &memory);
+        VkDeviceSize vram = 0;
+        for (uint32_t i = 0; i < memory.memoryHeapCount; ++i)
+            if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, memory.memoryHeaps[i].size);
+        const int64_t score = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? int64_t{1} << 48 : 0) + static_cast<int64_t>(vram >> 20) + 1;
         if (score > bestScore) {
             bestScore = score;
             physicalDevice = pd;

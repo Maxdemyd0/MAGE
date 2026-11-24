@@ -145,11 +145,35 @@ def wave(t):
     return r, (0, 0, 0)
 
 
+def fall(t):
+    s = math.sin(2 * math.pi * t)
+    r = {"Spine": quat(x=8)}
+    for side, x in (("Left", 1), ("Right", -1)):
+        r[side + "Arm"] = quat(z=x * (65 + 8 * s), x=-10)
+        r[side + "ForeArm"] = quat(x=-30)
+        r[side + "UpLeg"] = quat(x=-25 + x * 8)
+        r[side + "Leg"] = quat(x=40 + x * 6 * s)
+    return r, (0, 0, 0)
+
+
+def knockdown(t):
+    down = smooth(t / .14) * smooth((1 - t) / .35)
+    r = {"Hips": quat(x=-86 * down), "Spine": quat(x=12 * down * (1 - down)), "Head": quat(x=10 * down)}
+    for side, x in (("Left", 1), ("Right", -1)):
+        r[side + "Arm"] = quat(z=x * (5 + 60 * down))
+        r[side + "ForeArm"] = quat(x=-12 - 20 * down)
+        r[side + "UpLeg"] = quat(x=-18 * down * (1.4 - x * .4))
+        r[side + "Leg"] = quat(x=30 * down * (1 - x * .3))
+    return r, (0, -.80 * down, 0)
+
+
 CLIPS = {
     "idle": (3.0, idle),
     "walk": (1.0, lambda t: gait(t, 26, 48, 24, 18, 3, .015, 1.4, 1.0)),
     "run": (0.64, lambda t: gait(t, 46, 90, 50, 85, 12, .04, 4.2, 0.64)),
     "wave": (2.2, wave),
+    "fall": (1.0, fall),
+    "knockdown": (2.4, knockdown),
 }
 
 blob, views, accessors = bytearray(), [], []

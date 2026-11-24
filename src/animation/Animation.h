@@ -82,6 +82,9 @@ MAGE_API void ComputeGlobals(const Rig& rig, const Pose& pose, std::vector<glm::
 MAGE_API void SkinMesh(const Skin& skin, const std::vector<glm::mat4>& globals, const std::vector<Vertex>& bind,
                        const std::vector<SkinInfluence>& influences, std::vector<Vertex>& out, AABB& bounds);
 
+// Horizontal distance per second that the clip travels (0 for clips animated in place).
+MAGE_API float ClipTravelSpeed(const Rig& rig, const AnimationClip& clip);
+
 // Adds clips made for another file of the same skeleton (bones are matched by name; a different
 // orientation of the root bone's parent and a different size are compensated). Returns the number
 // of clips added; 'matched' receives the largest number of animated bones that exist in the target.

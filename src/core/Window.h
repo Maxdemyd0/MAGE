@@ -34,6 +34,8 @@ public:
     void SetVSync(bool enabled);
     bool VSync() const { return m_vsync; }
     void SetTitle(const std::string& title);
+    void SetCursorCaptured(bool captured); // hidden and locked, for mouse look
+    bool CursorCaptured() const;
 
     std::vector<std::filesystem::path> TakeDroppedFiles(); // files dragged onto the window
 

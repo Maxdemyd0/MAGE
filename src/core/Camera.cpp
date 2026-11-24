@@ -103,6 +103,52 @@ void ChaseCameraController::Update(Camera& camera, const Input& input, const glm
     camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
 }
 
+// ----------------------------------------------------------------------------- Third person
+void ThirdPersonCameraController::Update(Camera& camera, const Input& input, const glm::vec3& feet, const glm::vec3& velocity, float heading,
+                                         float dt, bool allowMouse, bool captured, const ClearanceFn& clearance) {
+    const glm::vec3 pivotTarget = feet + glm::vec3(0.0f, pivotHeight, 0.0f);
+    if (!m_initialized) {
+        m_yaw = heading;
+        m_pitch = 0.25f;
+        m_current = distance;
+        m_pivot = pivotTarget;
+        m_idleMouse = 0.0f;
+        m_initialized = true;
+    }
+    if (captured || (allowMouse && input.IsMouseDown(GLFW_MOUSE_BUTTON_RIGHT))) {
+        m_yaw = WrapAngle(m_yaw - input.MouseDelta().x * sensitivity);
+        m_pitch = std::clamp(m_pitch + input.MouseDelta().y * sensitivity, -0.9f, 1.3f);
+        m_idleMouse = 0.0f;
+    } else {
+        m_idleMouse += dt;
+    }
+    if (allowMouse && input.ScrollDelta() != 0.0f) distance = std::clamp(distance - input.ScrollDelta() * 0.4f, 1.5f, 12.0f);
+
+    // Without mouse input, swing behind sideways movement (not when walking towards the camera).
+    const glm::vec2 v(velocity.x, velocity.z);
+    if (m_idleMouse > 1.0f && glm::length(v) > 0.5f) {
+        const float off = WrapAngle(std::atan2(v.x, v.y) - m_yaw);
+        if (std::abs(off) < 2.6f) m_yaw = WrapAngle(m_yaw + off * Damp(0.9f, dt));
+    }
+
+    // Vertical smoothing hides stairs; horizontal tracking is tight. Teleports snap.
+    if (glm::distance(m_pivot, pivotTarget) > 5.0f) m_pivot = pivotTarget;
+    m_pivot.x = pivotTarget.x;
+    m_pivot.z = pivotTarget.z;
+    m_pivot.y += (pivotTarget.y - m_pivot.y) * Damp(14.0f, dt);
+
+    const glm::vec3 forward(std::cos(m_pitch) * std::sin(m_yaw), -std::sin(m_pitch), std::cos(m_pitch) * std::cos(m_yaw));
+    const glm::vec3 right(-std::cos(m_yaw), 0.0f, std::sin(m_yaw));
+    auto clear = [&](const glm::vec3& from, const glm::vec3& dir, float d) { return clearance ? clearance(from, dir, d) : d; };
+    const glm::vec3 aim = m_pivot + right * clear(m_pivot, right, shoulder);
+    const float allowed = clear(aim, -forward, distance);
+    // Snap in (never show the inside of a wall), ease out.
+    m_current = allowed < m_current ? allowed : m_current + (allowed - m_current) * Damp(6.0f, dt);
+    camera.position = aim - forward * m_current;
+    camera.target = aim + forward * 0.5f;
+    camera.up = glm::vec3(0.0f, 1.0f, 0.0f);
+}
+
 // ----------------------------------------------------------------------------- Fly camera
 void FlyCameraController::SyncFrom(const Camera& camera) {
     const glm::vec3 f = camera.Forward();
